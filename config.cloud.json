@@ -1,0 +1,29 @@
+{
+  "_comment": "云端版配置：GitHub Actions 服务器在美国，被墙的源（Google News / 彭博）也能直接访问，全部启用。推送 key 从环境变量（GitHub Secrets）读取，不写在这里。",
+  "push": {
+    "serverchan_key": "",
+    "pushplus_token": ""
+  },
+  "proxy": "",
+  "max_per_section": 8,
+  "max_total": 45,
+  "feeds": [
+    { "name": "WSJ-World",   "topic": "macro",  "enabled": true,  "url": "https://feeds.content.dowjones.io/public/rss/RSSWorldNews" },
+    { "name": "WSJ-Markets", "topic": "other",  "enabled": true,  "strict": true, "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain" },
+    { "name": "CNBC-Economy","topic": "macro",  "enabled": true,  "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114" },
+    { "name": "CNBC-Markets","topic": "other",  "enabled": true,  "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258" },
+    { "name": "MW-Top",      "topic": "other",  "enabled": true,  "strict": true, "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories" },
+    { "name": "MW-Pulse",    "topic": "macro",  "enabled": true,  "url": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse" },
+    { "name": "FXStreet",    "topic": "macro",  "enabled": true,  "url": "https://www.fxstreet.com/rss/news" },
+    { "name": "OilPrice",    "topic": "energy", "enabled": true,  "url": "https://oilprice.com/rss/main" },
+    { "name": "Mining",      "topic": "metals", "enabled": true,  "url": "https://www.mining.com/feed/" },
+    { "name": "WorldGrain",  "topic": "agri",   "enabled": true,  "url": "https://www.world-grain.com/rss/articles" },
+
+    { "name": "GNews-Fed",   "topic": "macro",  "enabled": true,  "url": "https://news.google.com/rss/search?q=Federal+Reserve+OR+inflation+OR+CPI+OR+tariff&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-Oil",   "topic": "energy", "enabled": true,  "url": "https://news.google.com/rss/search?q=crude+oil+OR+OPEC+OR+natural+gas&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-Metals","topic": "metals", "enabled": true,  "url": "https://news.google.com/rss/search?q=gold+OR+copper+OR+metals+prices&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-Agri",  "topic": "agri",   "enabled": true,  "url": "https://news.google.com/rss/search?q=soybeans+OR+corn+OR+wheat+OR+grain&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "Bloomberg-Markets", "topic": "other", "enabled": true, "url": "https://feeds.bloomberg.com/markets/news.rss" },
+    { "name": "Bloomberg-Econ",    "topic": "macro", "enabled": true, "url": "https://feeds.bloomberg.com/economics/news.rss" }
+  ]
+}

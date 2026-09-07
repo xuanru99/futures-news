@@ -1,0 +1,41 @@
+name: futures-news
+
+# 定时触发（UTC 时间；北京时间 = UTC + 8）
+#   00:00 UTC = 北京 08:00 晨报（回溯16小时，覆盖隔夜美盘）
+#   09:00 UTC = 北京 17:00 晚报（回溯9小时，覆盖白天时段）
+on:
+  schedule:
+    - cron: "0 0 * * *"
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}   # 允许在 GitHub 页面手动点 Run workflow 测试
+
+jobs:
+  push-news:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run morning digest
+        if: github.event.schedule == '0 0 * * *'
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python news_bot.py --config config.cloud.json morning
+
+      - name: Run evening digest
+        if: github.event.schedule == '0 9 * * *'
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python news_bot.py --config config.cloud.json evening
+
+      - name: Run manual test (morning by default)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python news_bot.py --config config.cloud.json morning

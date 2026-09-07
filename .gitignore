@@ -1,0 +1,5 @@
+digests/
+__pycache__/
+*.pyc
+.scratch/
+config.json
