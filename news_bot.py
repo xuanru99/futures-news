@@ -57,6 +57,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 TOPIC_ORDER = ["macro", "energy", "metals", "agri", "other"]
+
+# 必收源（一手权威财经媒体）：WSJ / Bloomberg 的新闻不做相关性筛选，全部收录，
+# 跨源同事件去重时也优先保留必收源版本。仅极端社会/娱乐噪音仍会被滤掉。
+MUST_PREFIXES = ("WSJ", "Bloomberg")
 TOPIC_CN = {
     "macro": "宏观 / 央行 / 地缘",
     "energy": "能源化工（原油 / 天然气）",
@@ -350,27 +354,40 @@ def collect(cfg):
             log(f"抓取失败 {feed['name']}: {type(e).__name__} {e}")
             continue
         added = 0
+        must_src = feed["name"].startswith(MUST_PREFIXES)
         for title, link, dt, src, desc in rows:
             k = norm_key(title)
             if not k or k in seen:
                 continue
+            if NOISE_DROP.search(title) or NOISE_DROP_ZH.search(title):
+                continue  # 体育/娱乐/社会案件类噪音（中英文），必收源同样滤掉
+            if must_src:
+                # WSJ / Bloomberg：不做关键词筛选与跨源模糊去重，全部收录
+                seen.add(k)
+                kept_titles.append((title, True))
+                topic = classify(title) or classify(_usable_desc(desc)) or "macro"
+                pool.append({"title": title, "link": link, "dt": dt,
+                             "src": src, "topic": topic, "desc": _usable_desc(desc),
+                             "must": True})
+                added += 1
+                continue
             if FOREX_DROP.search(title):
                 continue  # 纯外汇货币对分析，与商品期货无关
-            if NOISE_DROP.search(title) or NOISE_DROP_ZH.search(title):
-                continue  # 体育/娱乐/社会案件类噪音（中英文）
-            # 模糊去重：与已收录标题相似度 > 0.8 视为同一事件（仅留最新一条）
+            # 模糊去重：与已收录标题相似度 > 0.8 视为同一事件
+            # （必收源版本已在库时直接丢弃其他源的重复报道）
             if any(difflib.SequenceMatcher(None, k, norm_key(t)).ratio() > 0.8
-                   for t in kept_titles):
+                   for t, _m in kept_titles):
                 continue
             seen.add(k)
-            kept_titles.append(title)
+            kept_titles.append((title, False))
             desc_txt = _usable_desc(desc)
             # 相关性总门槛：标题/描述都与宏观、商品、市场无关的新闻直接丢弃
             topic = classify(title) or classify(desc_txt)
             if topic is None:
                 continue
             pool.append({"title": title, "link": link, "dt": dt,
-                         "src": src, "topic": topic, "desc": desc_txt})
+                         "src": src, "topic": topic, "desc": desc_txt,
+                         "must": False})
             added += 1
         log(f"抓取成功 {feed['name']}: {len(rows)} 条, 新增 {added}")
     return pool
@@ -811,13 +828,20 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
         sections[x["topic"]].append(x)
 
     # 先确定入选条目，再并发抓整篇正文
-    selected = []
+    # WSJ / Bloomberg 必收：每板块额外最多 4 条且不占 max_per_section 名额，
+    # 板块内排最前；其余源按时间取 max_per_section 条，受 max_total 总量约束。
+    selected, chosen, must_total, other_total = [], {}, 0, 0
     for t in TOPIC_ORDER:
-        rows = sections[t][:max_per_section]
-        if rows and len(selected) < max_total:
+        must_rows = [x for x in sections[t] if x.get("must")][:4]
+        must_total += len(must_rows)
+        if not must_rows and not sections[t]:
+            continue
+        rows = must_rows + [x for x in sections[t] if not x.get("must")][:max_per_section]
+        if rows and other_total < max_total:
+            other_total += len(rows) - len(must_rows)
+            chosen[t] = rows
             selected.extend(rows)
-    total = min(sum(min(len(sections[t]), max_per_section) for t in TOPIC_ORDER),
-                max_total)
+    total = len(selected)
 
     for x in selected:
         x["paras"], x["paras_zh"], x["real_link"] = [], [], x["link"]
@@ -909,8 +933,8 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
             lines.append(calendar_md)
         count = 0
         for t in TOPIC_ORDER:
-            rows = sections[t][:max_per_section]
-            if not rows or count >= max_total:
+            rows = chosen.get(t, [])
+            if not rows or count >= max_total + must_total:
                 continue
             lines.append(f"\n## {TOPIC_CN[t]}（{len(rows)}）\n")
             for i, x in enumerate(rows):
@@ -1004,7 +1028,7 @@ def do_push(cfg, title, md):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", choices=["morning", "evening"],
-                    help="morning=晨报(16h) evening=晚报(9h)")
+                    help="morning=晨报(16h) evening=晚报(12h)")
     ap.add_argument("--hours", type=int, help="自定义回溯小时数")
     ap.add_argument("--test", action="store_true", help="只生成不推送")
     ap.add_argument("--out-only", action="store_true",
@@ -1028,10 +1052,10 @@ def main():
     elif args.mode == "morning":
         hours = 16
     elif args.mode == "evening":
-        hours = 9
+        hours = 12  # 早7:30 晨报 → 晚7:30 晚报，12h 正好无缝衔接
     else:
         h = now_cn().hour
-        hours = 16 if h < 12 else 9
+        hours = 16 if h < 12 else 12
     mode_label = "晨报" if hours > 12 else "晚报"
 
     log(f"开始抓取（回溯 {hours} 小时）…")

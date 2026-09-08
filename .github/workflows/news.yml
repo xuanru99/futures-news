@@ -1,16 +1,16 @@
 name: futures-news
 
 # 定时触发（UTC 时间；北京时间 = UTC + 8）
-#   00:00 UTC = 北京 08:00 晨报（回溯16小时，覆盖隔夜美盘）
-#   09:00 UTC = 北京 17:00 晚报（回溯9小时，覆盖白天时段）
+#   23:30 UTC = 北京 07:30 晨报（回溯16小时，覆盖隔夜美盘）
+#   11:30 UTC = 北京 19:30 晚报（回溯12小时，与晨报无缝衔接）
 on:
   schedule:
-    - cron: "0 0 * * *"
-    - cron: "0 9 * * *"
+    - cron: "30 23 * * *"
+    - cron: "30 11 * * *"
   workflow_dispatch:          # 允许在 GitHub 页面手动 Run workflow 测试
     inputs:
       mode:
-        description: "morning=晨报(回溯16h) evening=晚报(回溯9h)"
+        description: "morning=晨报(回溯16h) evening=晚报(回溯12h)"
         type: choice
         default: morning
         options: [morning, evening]
@@ -30,7 +30,7 @@ jobs:
 
       - name: Decide mode
         run: |
-          if [ "${{ github.event.schedule }}" = "0 9 * * *" ]; then
+          if [ "${{ github.event.schedule }}" = "30 11 * * *" ]; then
             echo "MODE=evening" >> "$GITHUB_ENV"
           else
             echo "MODE=${{ github.event.inputs.mode || 'morning' }}" >> "$GITHUB_ENV"
