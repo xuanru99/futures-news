@@ -4,31 +4,38 @@
 期货外盘新闻简报推送机器人
 ================================
 抓取国外主流财经媒体与机构 RSS（Reuters / Bloomberg / FT / WSJ / CNBC / EIA / OPEC / Argus / Platts /
-Mining.com / World Grain 等），按主题分类去重，机器翻译成中文，
-生成"今日要点速览 + 分板块中文化全文简报"，推送到微信（Server酱 / PushPlus）。
+Mining.com / World Grain 等），按主题分类去重，整篇正文机器翻译成中文并生成独立网页（GitHub Pages 托管），
+推送到微信（Server酱 / PushPlus，支持多个微信）。
 
-简报结构：
-    1. 今日要点速览 —— 按重大性打分（地缘/天气/行情剧变/央行/供需）挑出的大事，带星级，绝不重复
+简报结构（v4）：
+    1. 今日要闻 —— 只放真正的大事（地缘冲突 / 美联储 / 美国政局 / 商品突发供需 / 行情剧变 / 极端天气），
+       按重大性打分 + 星级，同一事件绝不重复
     2. 财经日历 —— 今明两天重要事件，同国家同指标族合并成一条，带实际值/预期值/前值
-    3. 分板块详情 —— 每条：中文标题 + 中文正文（内联直读，无需点链接）+ 英文原文链接（附在条目末尾）
+    3. 分板块详情 —— 每条：中文标题 + 中文摘要 + 两个链接：
+       【📖 中文全文】= 该新闻整篇翻译的中文网页（点开即读，托管在 GitHub Pages）
+       【🌐 英文原文】= 出版方原始链接
 
-翻译：主通道 Google 翻译免费接口（GitHub Actions 美国机房可用），
+翻译：主通道 Google 翻译免费接口（GitHub Actions 美国机房可用），长文自动分块；
       兜底 MyMemory（本机/云端都可用，免费额度有限）。翻译失败自动回退英文原文。
 
 用法：
-    python news_bot.py --test            # 只生成简报到 digests/ 目录，不推送（先跑这个看效果）
+    python news_bot.py --test            # 只生成简报和中文网页到本地，不推送（先跑这个看效果）
     python news_bot.py                   # 生成并推送（需在 config.json 填好推送 key）
     python news_bot.py morning           # 晨报模式：回溯最近 16 小时（覆盖隔夜美盘）
     python news_bot.py evening           # 晚报模式：回溯最近 9 小时（覆盖白天时段）
     python news_bot.py --hours 12        # 自定义回溯窗口
+    python news_bot.py --out-only ...    # 只生成（digests/pending.md + pending.json），不推送
+    python news_bot.py --push-file digests/pending.json   # 推送已生成的简报（云端先发布网页再推送用）
     python news_bot.py --config config.cloud.json   # 使用云端配置
 
 配置：同目录 config.json
-推送 key 优先级：环境变量 SERVERCHAN_KEY / PUSHPLUS_TOKEN > config.json（云端部署用环境变量，避免 key 进代码库）
+推送 key 优先级：环境变量（SERVERCHAN_KEY / SERVERCHAN_KEY_2 / SERVERCHAN_KEYS，支持逗号分隔多个）
+                > config.json（云端部署用环境变量，避免 key 进代码库）
 """
 
 import argparse
 import difflib
+import hashlib
 import html as htmllib
 import json
 import os
@@ -143,38 +150,56 @@ KEYWORDS_ZH = {
 }
 _COMPILED_ZH = {t: re.compile(p) for t, p in KEYWORDS_ZH.items()}
 
-# ---------------------------------------------------------------- 重大性打分（"今日要点速览"用）
-# (类别, 权重, 关键词正则)：命中的新闻进入"今日要点"候选，权重高者优先入选
+# ---------------------------------------------------------------- 重大性打分（"今日要闻"用）
+# 只放真正的大事：地缘冲突 / 美联储 / 美国政局 / 商品突发供需 / 行情剧变 / 极端天气。
+# (类别, 权重, 关键词正则)：命中的新闻进入"今日要闻"候选；总分 >= 3 才有资格入选。
 IMPORTANCE_CATS = [
-    ("地缘", 3, re.compile(
+    ("地缘冲突", 3, re.compile(
         r"\b(war|wars|missile\w*|airstrike|air strike|attack\w*|drone strike|"
         r"invasion|invade\w*|escalat\w*|sanction\w*|embargo|hormuz|red sea|"
-        r"houthi|blockade|ceasefire|nuclear)\b", re.I)),
-    ("天气", 3, re.compile(
+        r"houthi|blockade|ceasefire|nuclear|military|troops?|strike[sd] on)\b", re.I)),
+    ("美联储", 3, re.compile(
+        r"\b(fed|feds|fomc|powell|fed chair\w*|federal reserve|rate cut\w*|"
+        r"rate hike\w*|interest[- ]rate|beige book|policy minutes|jackson hole|"
+        r"rate decision)\b", re.I)),
+    ("美国政局", 3, re.compile(
+        r"\b(white house|executive order|president|administration|treasury "
+        r"department|state department|congress|senate|government shutdown|"
+        r"trade deal|tariff\w*|election|signs? into law)\b", re.I)),
+    ("供需突发", 3, re.compile(
+        r"\b(opec\+?|production cut\w*|output cut\w*|export (ban\w*|curb\w*|"
+        r"restriction\w*)|force majeure|outage\w*|shortage\w*|deficit|surplus|"
+        r"halt\w*|disruption\w*|strategic reserve|quota\w*)\b", re.I)),
+    ("极端天气", 2, re.compile(
         r"\b(el ni[nñ]o|la ni[nñ]a|drought\w*|flood\w*|heatwave|heat wave|"
         r"hurricane\w*|typhoon\w*|cyclone\w*|frost|monsoon|wildfire\w*)\b", re.I)),
-    ("行情", 2, re.compile(
-        r"\b(surge[sd]?|surging|soar\w*|plunge[sd]?|plunging|tumble\w*|"
-        r"spike[sd]?|slump\w*|skyrocket\w*|record (high|low)|"
-        r"all[- ]time (high|low)|selloff|crash\w*|rally)\b", re.I)),
-    ("央行", 2, re.compile(
-        r"\b(rate cut\w*|rate hike\w*|interest[- ]rate|fomc|powell|"
-        r"fed chair\w*|ecb|boj|central bank\w*|beige book|stimulus|"
-        r"policy minutes)\b", re.I)),
-    ("供需", 2, re.compile(
-        r"\b(opec\+?|production cut\w*|output cut\w*|quota\w*|"
-        r"export (ban\w*|curb\w*|restriction\w*)|force majeure|outage\w*|"
-        r"shortage\w*|deficit|surplus|halt\w*|disruption\w*)\b", re.I)),
+    ("其他央行", 2, re.compile(
+        r"\b(ecb|boj|bank of japan|pboc|central bank\w*|stimulus|"
+        r"policy (meeting|decision))\b", re.I)),
 ]
+# 行情剧变词 + 市场名词：两者同时出现才算"暴涨暴跌"级大事（单独一个 move 动词太常见）
+_MOVE_RE = re.compile(
+    r"\b(surge[sd]?|surging|soar\w*|plunge[sd]?|plunging|tumble\w*|spike[sd]?|"
+    r"slump\w*|skyrocket\w*|record (high|low)|all[- ]time (high|low)|selloff|"
+    r"crash\w*|rally|rout)\b", re.I)
+_MARKET_RE = re.compile(
+    r"\b(oil|crude|brent|wti|gold|silver|copper|aluminum|aluminium|nickel|zinc|"
+    r"iron ore|wheat|corn|soybean\w*|natural gas|lng|commodit\w*|nasdaq|"
+    r"s&p ?500|dow jones|tech stock\w*|wall street|stock market|shares|"
+    r"treasury yields?)\b", re.I)
 
 
 def importance(title):
-    """返回 (总分, 命中类别列表)；总分 >= 2 才有资格进"今日要点"。"""
+    """返回 (总分, 命中类别列表)；总分 >= 3 才有资格进"今日要闻"。"""
     score, cats = 0, []
     for cat, w, pat in IMPORTANCE_CATS:
         if pat.search(title):
             score += w
             cats.append(cat)
+    # 暴涨暴跌 + 具体市场同时命中才算行情剧变大事
+    if _MOVE_RE.search(title) and _MARKET_RE.search(title):
+        score += 2
+        cats.append("行情剧变")
     return score, cats
 
 # ---------------------------------------------------------------- 工具函数
@@ -417,49 +442,54 @@ def _clean_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def fetch_excerpt(opener, link, timeout=10):
-    """抓原文页面提取正文（og:description + 前几段，约 600 字符供翻译）；失败返回空串。"""
-    real_link = link
+def _resolve_google_news(opener, link, timeout=10):
+    """Google News 跳转页：解出真实出版方链接；失败返回原链接。"""
+    if "news.google.com" not in urllib.parse.urlparse(link).netloc:
+        return link
     try:
-        # Google News 跳转页：先解出真实出版方链接
-        if "news.google.com" in urllib.parse.urlparse(link).netloc:
-            req = urllib.request.Request(link, headers={"User-Agent": UA})
-            with opener.open(req, timeout=timeout) as r:
-                body = r.read(200000).decode("utf-8", "ignore")
-            m = re.search(r'<a[^>]+href="(https?://(?!news\.google\.com|support\.google\.com|policies\.google\.com)[^"]+)"',
-                          body, re.I)
-            if not m:
-                return ""
-            real_link = htmllib.unescape(m.group(1))
-        req = urllib.request.Request(real_link, headers={"User-Agent": UA})
+        req = urllib.request.Request(link, headers={"User-Agent": UA})
         with opener.open(req, timeout=timeout) as r:
-            body = r.read(400000).decode("utf-8", "ignore")
+            body = r.read(200000).decode("utf-8", "ignore")
+        m = re.search(r'<a[^>]+href="(https?://(?!news\.google\.com|support\.google\.com|policies\.google\.com)[^"]+)"',
+                      body, re.I)
+        return htmllib.unescape(m.group(1)) if m else ""
     except Exception:
         return ""
-    # 先剥掉脚本和样式块，防止 JS 代码混进正文
-    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body, flags=re.S | re.I)
-    m = _META_DESC_RE.search(body) or _META_DESC_RE2.search(body)
-    parts = []
-    if m:
-        d = _clean_text(m.group(1))
-        if len(d) >= 40 and not _PARA_CODE.search(d):
-            parts.append(d)
-    # 兜底/补充：正文前几段（凑够 ~600 字符供翻译）
+
+
+def fetch_full_article(opener, link, timeout=12, max_chars=15000, max_paras=80):
+    """抓原文页面，提取整篇正文段落（用于全文翻译）。
+    返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。"""
+    real_link = _resolve_google_news(opener, link)
+    if not real_link:
+        return [], link
+    try:
+        req = urllib.request.Request(real_link, headers={"User-Agent": UA})
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read(600000).decode("utf-8", "ignore")
+    except Exception:
+        return [], real_link
+    # 剥掉脚本 / 样式 / 导航页脚等非正文块
+    body = re.sub(r"<(script|style|nav|footer|aside|header|form)[^>]*>.*?</\1>", " ",
+                  body, flags=re.S | re.I)
+    paras = []
     for pm in re.finditer(r"<p[^>]*>(.*?)</p>", body, re.S | re.I):
         t = _clean_text(pm.group(1))
-        if len(t) < 60 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
+        if len(t) < 40 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
             continue
-        if parts and (t in parts[-1] or parts[-1] in t):
-            continue  # 与 meta 描述重复
-        parts.append(t)
-        if sum(len(p) for p in parts) >= 600:
+        if paras and (t in paras[-1] or paras[-1] in t):
+            continue  # 与上一段重复
+        paras.append(t)
+        if len(paras) >= max_paras or sum(len(p) for p in paras) >= max_chars:
             break
-    text = " ".join(parts)
-    if len(text) < 40:
-        return ""
-    if len(text) > 700:
-        text = text[:700]
-    return text
+    # 正文太少时，用 meta 描述（通常是导语）补一段
+    if sum(len(p) for p in paras) < 400:
+        m = _META_DESC_RE.search(body) or _META_DESC_RE2.search(body)
+        if m:
+            d = _clean_text(m.group(1))
+            if len(d) >= 60 and not _PARA_CODE.search(d) and d not in paras:
+                paras.insert(0, d)
+    return paras, real_link
 
 # ---------------------------------------------------------------- 机器翻译（中文化简报）
 # 主接口 Google 翻译免费通道（GitHub Actions 美国机房可用，本机被墙），
@@ -472,12 +502,27 @@ _MM_JUNK = re.compile(r"MYMEMORY WARNING|QUERY LENGTH LIMIT|INVALID (SOURCE|TARG
 
 
 def _google_translate(opener, text):
-    url = ("https://translate.googleapis.com/translate_a/single?client=gtx"
-           "&sl=en&tl=zh-CN&dt=t&q=" + urllib.parse.quote(text))
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with opener.open(req, timeout=10) as r:
-        data = json.loads(r.read().decode("utf-8", "ignore"))
-    return "".join(seg[0] for seg in data[0] if seg and seg[0])
+    """Google 免费通道；长文自动按句分块（每块 <=1200 字符），429/5xx 重试一次。"""
+    out = []
+    for chunk in _split_sentences(text, 1200) or [text]:
+        url = ("https://translate.googleapis.com/translate_a/single?client=gtx"
+               "&sl=en&tl=zh-CN&dt=t&q=" + urllib.parse.quote(chunk))
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with opener.open(req, timeout=15) as r:
+                    data = json.loads(r.read().decode("utf-8", "ignore"))
+                out.append("".join(seg[0] for seg in data[0] if seg and seg[0]))
+                break
+            except urllib.error.HTTPError as e:
+                if attempt == 2 or e.code not in (429, 500, 502, 503):
+                    raise
+                import time
+                time.sleep(2.5)
+            except Exception:
+                if attempt == 2:
+                    raise
+    return "".join(out)
 
 
 def _split_sentences(text, limit=400):
@@ -646,7 +691,93 @@ def fetch_calendar(opener, days=2, limit=12):
     log(f"财经日历：{len(picked)} 个事件合并为 {len(lines)} 条（{days} 天内）")
     return "\n".join(lines)
 
-# ---------------------------------------------------------------- 简报生成
+# ---------------------------------------------------------------- 中文全文网页（GitHub Pages 托管）
+
+_PAGE_TMPL = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+max-width:720px;margin:0 auto;padding:18px 16px 40px;line-height:1.95;color:#1a1a1a;background:#fff}}
+h1{{font-size:1.32em;line-height:1.5;margin:10px 0 4px}}
+.meta{{color:#888;font-size:.85em;margin-bottom:4px}}
+a{{color:#2563eb}}
+.btn{{display:inline-block;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;
+padding:8px 16px;font-size:.9em;margin:10px 0 14px}}
+p{{margin:0 0 1.05em;text-align:justify}}
+.note{{color:#999;font-size:.8em;border-top:1px solid #eee;padding-top:12px;margin-top:28px;word-break:break-all}}
+.s{{color:#999;font-size:.82em}}
+li{{margin:.45em 0}}
+</style>
+</head>
+<body>
+<a class="btn" href="{orig}" rel="noopener noreferrer">🌐 查看英文原文</a>
+<h1>{title}</h1>
+<div class="meta">{src} · {time} · 机器翻译，仅供参考</div>
+{paras}
+<div class="note">英文原文：{orig_text}</div>
+</body>
+</html>"""
+
+_PAGE_INDEX_TMPL = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>期货外盘简报 · {date} 全文索引</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+max-width:720px;margin:0 auto;padding:18px 16px 40px;line-height:1.8;color:#1a1a1a;background:#fff}}
+h1{{font-size:1.25em}} a{{color:#2563eb}}
+.s{{color:#999;font-size:.82em}} li{{margin:.45em 0}}
+</style>
+</head>
+<body>
+<h1>期货外盘简报 · {date} 中文全文索引</h1>
+<ul>
+{items}
+</ul>
+</body>
+</html>"""
+
+
+def write_article_pages(selected, pages_base):
+    """把每条已全文翻译的新闻写成独立 HTML 页（docs/articles/<日期>/<hash>.html，
+    交给 GitHub Pages 托管），并在每条上记录 page_url；返回生成页数。"""
+    date_dir = now_cn().strftime("%Y-%m-%d")
+    adir = BASE / "docs" / "articles" / date_dir
+    n = 0
+    for x in selected:
+        if not x.get("paras_zh"):
+            continue
+        orig = x.get("real_link") or x["link"]
+        slug = hashlib.md5(orig.encode("utf-8")).hexdigest()[:10]
+        adir.mkdir(parents=True, exist_ok=True)
+        tm = x["dt"].strftime("%Y-%m-%d %H:%M") if x["dt"] else now_cn().strftime("%Y-%m-%d")
+        paras_html = "\n".join(f"<p>{htmllib.escape(p)}</p>" for p in x["paras_zh"])
+        (adir / f"{slug}.html").write_text(_PAGE_TMPL.format(
+            title=htmllib.escape(x["title_zh"]),
+            orig=htmllib.escape(orig, quote=True),
+            src=htmllib.escape(x["src"]), time=tm,
+            paras=paras_html, orig_text=htmllib.escape(orig)), encoding="utf-8")
+        x["_slug"] = slug
+        x["page_url"] = f"{pages_base.rstrip('/')}/articles/{date_dir}/{slug}.html"
+        n += 1
+    # 当日索引页：列出本次运行的全部文章
+    if n:
+        rows = []
+        for x in selected:
+            if x.get("_slug"):
+                rows.append(
+                    f'<li><a href="{x["_slug"]}.html">{htmllib.escape(x["title_zh"])}</a>'
+                    f' <span class="s">{htmllib.escape(x["src"])}</span></li>')
+        (adir / "index.html").write_text(
+            _PAGE_INDEX_TMPL.format(date=date_dir, items="\n".join(rows)), encoding="utf-8")
+    return n
+
 
 def _trim_zh(text, limit):
     """中文文本截断（在标点处收尾，加省略号）。"""
@@ -655,9 +786,23 @@ def _trim_zh(text, limit):
     return text[:limit].rstrip("，。；、！？,.;:！？ ") + "…"
 
 
+def _first_zh(text, limit=200):
+    """取译文开头 1-2 句当摘要（在句号处收尾）。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for i in range(len(cut) - 1, 40, -1):
+        if cut[i] in "。！？":
+            return cut[:i + 1]
+    return _trim_zh(cut, limit)
+
+# ---------------------------------------------------------------- 简报生成
+
+
 def build_digest(pool, hours, mode_label, max_per_section, max_total,
-                 opener=None, fetch_excerpts=True, translate_on=True,
-                 body_chars=320, calendar_md=""):
+                 opener=None, translate_on=True, summary_chars=130,
+                 calendar_md="", pages_base="", max_overview=8):
     cutoff = now_cn() - timedelta(hours=hours)
     fresh = [x for x in pool if x["dt"] is None or x["dt"] >= cutoff]
     fresh.sort(key=lambda x: x["dt"] or now_cn(), reverse=True)
@@ -665,7 +810,7 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
     for x in fresh:
         sections[x["topic"]].append(x)
 
-    # 先确定入选条目，再并发抓正文
+    # 先确定入选条目，再并发抓整篇正文
     selected = []
     for t in TOPIC_ORDER:
         rows = sections[t][:max_per_section]
@@ -674,76 +819,89 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
     total = min(sum(min(len(sections[t]), max_per_section) for t in TOPIC_ORDER),
                 max_total)
 
-    excerpts = {}
-    if fetch_excerpts and opener is not None and selected:
-        log(f"并发抓取 {len(selected)} 条新闻的原文正文…")
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            futs = {ex.submit(fetch_excerpt, opener, x["link"]): x["link"]
-                    for x in selected}
-            for fut, lnk in futs.items():
-                try:
-                    excerpts[lnk] = fut.result(timeout=40)
-                except Exception:
-                    excerpts[lnk] = ""
-        got = sum(1 for v in excerpts.values() if v)
-        log(f"正文抓取完成：成功 {got}/{len(selected)}")
-
-    # 机器翻译：中文标题 + 中文正文（失败自动回退英文）
-    tr = {}
     for x in selected:
-        x["body_en"] = ""
-        x["body_zh"] = ""
-        x["title_zh"] = x["title"]
+        x["paras"], x["paras_zh"], x["real_link"] = [], [], x["link"]
+        x["title_zh"], x["page_url"], x["summary"] = x["title"], "", ""
+
+    # 1) 并发抓整篇正文（Google News 链接会先解出真实出版方链接）
+    if opener is not None and selected:
+        log(f"并发抓取 {len(selected)} 条新闻的整篇正文…")
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futs = {ex.submit(fetch_full_article, opener, x["link"]): x
+                    for x in selected}
+            for fut, x in futs.items():
+                try:
+                    paras, real = fut.result(timeout=60)
+                    x["paras"], x["real_link"] = paras, real
+                except Exception:
+                    pass
+        for x in selected:  # 正文抓不到时回退 RSS 描述
+            if not x["paras"] and x.get("desc"):
+                x["paras"] = [x["desc"]]
+        log(f"正文抓取完成：成功 {sum(1 for x in selected if x['paras'])}/{len(selected)}")
+
+    # 2) 全文翻译：标题 + 每个正文段落并发翻译（整篇翻完，不只翻一两句）
     if translate_on and opener is not None:
         texts = []
         for x in selected:
-            src = excerpts.get(x["link"], "") or x.get("desc", "")
-            t = x["title"]
-            if src[:len(t)] == t:  # 正文开头重复了标题，剥掉
-                src = src[len(t):].lstrip(" -–—:,.，")
-            x["body_en"] = src[:600]
             texts.append(x["title"])
-            if x["body_en"]:
-                texts.append(x["body_en"])
+            texts.extend(x["paras"])
         uniq = list({t for t in texts if t})
-        log(f"并发翻译 {len(uniq)} 段文本（标题+正文）…")
-        tr = translate_many(opener, texts)
-        got = sum(1 for v in tr.values() if v)
-        log(f"翻译完成：成功 {got}/{len(tr)}")
+        log(f"并发翻译 {len(uniq)} 段文本（标题 + 全部正文段落）…")
+        tr = translate_many(opener, uniq, workers=8)
+        log(f"翻译完成：成功 {sum(1 for v in tr.values() if v)}/{len(tr)}")
         for x in selected:
             x["title_zh"] = tr.get(x["title"]) or x["title"]
-            x["body_zh"] = tr.get(x["body_en"], "") if x["body_en"] else ""
+            x["paras_zh"] = [tr.get(p) or p for p in x["paras"]]
+    else:
+        for x in selected:  # 翻译关闭时直接用原文（页面照常生成）
+            x["paras_zh"] = list(x["paras"])
 
-    # 今日要点速览：重大性打分（>=2 分入选），每类别最多 2 条，总共最多 8 条；
-    # 同一事件的不同表述（相似度 > 0.6）只保留分数最高的一条，绝不重复
+    # 3) 每条新闻生成独立中文全文网页（点开即读整篇中文翻译）
+    if pages_base:
+        log(f"生成中文全文网页 → docs/articles/{now_cn().strftime('%Y-%m-%d')}/")
+        log(f"共生成 {write_article_pages(selected, pages_base)} 个中文全文网页")
+
+    # 4) 每条提炼一句中文摘要（正文译文的前 1-2 句）
+    for x in selected:
+        x["summary"] = _first_zh("".join(x["paras_zh"]))
+
+    # 5) 今日要闻：重大性打分（>=3 分入选，权重 3 的类目才算"要"），最多 max_overview 条；
+    #    同一事件的不同表述（相似度 > 0.6）只保留分数最高的一条，绝不重复
     scored = []
     for x in selected:
         s, cats = importance(x["title"])
-        if s >= 2:
+        if s >= 3:
             scored.append((s, cats, x))
     scored.sort(key=lambda r: (-r[0], -(r[2]["dt"] or now_cn()).timestamp()))
-    overview, cat_count, seen_keys = [], {}, []
+    overview, seen_keys = [], []
     for s, cats, x in scored:
-        if len(overview) >= 8:
+        if len(overview) >= max_overview:
             break
-        if any(cat_count.get(c, 0) >= 2 for c in cats):
-            continue
         k = norm_key(x["title"])
         if any(difflib.SequenceMatcher(None, k, sk).ratio() > 0.6 for sk in seen_keys):
-            continue  # 同一事件不同报道，只留一条
+            continue  # 同一事件不同报道，只留分数最高的一条
         seen_keys.append(k)
-        for c in cats:
-            cat_count[c] = cat_count.get(c, 0) + 1
         overview.append((cats[0], s, x))
 
-    def render(bchars):
+    def links_md(x):
+        parts = []
+        if x.get("page_url"):
+            parts.append(f"[📖 中文全文]({x['page_url']})")
+        parts.append(f"[🌐 英文原文]({x['real_link'] or x['link']})")
+        return " ｜ ".join(parts)
+
+    def render(schars):
         lines = []
-        lines.append("\n## 📌 今日要点速览\n")
+        lines.append("\n## 🚨 今日要闻\n")
         if overview:
             for i, (cat, s, x) in enumerate(overview, 1):
-                stars = "★★★" if s >= 5 else ("★★" if s >= 3 else "★")
-                lines.append(f"**{i}.【{cat}】{stars} {_trim_zh(x['title_zh'], 46)}** "
-                             f"—— [阅读原文]({x['link']})")
+                stars = "★★★" if s >= 5 else "★★"
+                lines.append(f"**{i}.【{cat}】{stars} {_trim_zh(x['title_zh'], 46)}**")
+                if schars > 0 and x["summary"]:
+                    lines.append(f"\n{_trim_zh(x['summary'], min(schars, 90))}")
+                lines.append(f"\n> {links_md(x)}")
+                lines.append("")
         else:
             lines.append("（本时段没有命中的重大事件，详见下方分板块简报）")
         if calendar_md:
@@ -759,10 +917,9 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
                 count += 1
                 tm = x["dt"].strftime("%H:%M") if x["dt"] else "--:--"
                 lines.append(f"**{i + 1}. {tm}【{x['src']}】{x['title_zh']}**")
-                body = (x["body_zh"] or x.get("body_en") or "").strip()
-                if bchars > 0 and body:
-                    lines.append(f"\n{_trim_zh(body, bchars)}")
-                lines.append(f"\n> [英文原文]({x['link']})")
+                if schars > 0 and x["summary"]:
+                    lines.append(f"\n{_trim_zh(x['summary'], schars)}")
+                lines.append(f"\n> {links_md(x)}")
                 lines.append("")
         if count == 0:
             lines.append("\n（本次时间窗口内没有抓到符合条件的新闻）")
@@ -770,17 +927,17 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
 
     head = (
         f"# 期货外盘{mode_label} · {now_cn().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"> 回溯最近 **{hours} 小时** · 共 **{total}** 条 · 全文中文摘要版 · "
+        f"> 回溯最近 **{hours} 小时** · 共 **{total}** 条 · 每条可点【📖 中文全文】读整篇翻译 · "
         f"来源：Reuters / Bloomberg / FT / WSJ / CNBC / EIA / OPEC / Argus / Platts 等\n"
     )
-    # 推送长度保护：Server酱上限约 32KB，超长时逐级压缩每条正文字数
-    bchars = body_chars
+    # 推送长度保护：Server酱上限约 32KB，超长时逐级压缩每条摘要字数
+    schars = summary_chars
     while True:
-        md = head + "\n".join(render(bchars)) + "\n"
-        if len(md.encode("utf-8")) <= 30000 or bchars <= 80:
+        md = head + "\n".join(render(schars)) + "\n"
+        if len(md.encode("utf-8")) <= 30000 or schars <= 60:
             break
-        bchars = max(80, bchars - 100)
-        log(f"简报超长，压缩每条正文字数至 {bchars}")
+        schars = max(60, schars - 40)
+        log(f"简报超长，压缩每条摘要字数至 {schars}")
     return md
 
 # ---------------------------------------------------------------- 推送
@@ -800,6 +957,48 @@ def push_pushplus(token, title, md):
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode("utf-8", "ignore")).get("code") == 200
 
+
+def get_push_keys(cfg):
+    """收集全部 Server酱 SendKey（支持多个微信）+ PushPlus token。
+    来源：环境变量 SERVERCHAN_KEYS（逗号分隔）/ SERVERCHAN_KEY / SERVERCHAN_KEY_2，
+    以及 config.json 的 push.serverchan_keys（列表或逗号分隔）。"""
+    sc_keys = []
+    sources = [os.environ.get("SERVERCHAN_KEYS", ""),
+               os.environ.get("SERVERCHAN_KEY", ""),
+               os.environ.get("SERVERCHAN_KEY_2", ""),
+               cfg.get("push", {}).get("serverchan_key", ""),
+               cfg.get("push", {}).get("serverchan_keys", "")]
+    for src in sources:
+        vals = src if isinstance(src, list) else str(src).split(",")
+        for k in vals:
+            k = k.strip()
+            if k and k not in sc_keys:
+                sc_keys.append(k)
+    pp = os.environ.get("PUSHPLUS_TOKEN") or cfg.get("push", {}).get("pushplus_token", "")
+    return sc_keys, pp
+
+
+def do_push(cfg, title, md):
+    sc_keys, pp = get_push_keys(cfg)
+    if not sc_keys and not pp:
+        print("未配置推送 key（环境变量 SERVERCHAN_KEY/SERVERCHAN_KEY_2/SERVERCHAN_KEYS "
+              "或 config.json -> push），本次只保存了文件未推送。", file=sys.stderr)
+        sys.exit(1)
+    ok = False
+    for i, key in enumerate(sc_keys, 1):
+        try:
+            ok = push_serverchan(key, title, md) or ok
+            log(f"Server酱 推送已发送（微信 {i}/{len(sc_keys)}）")
+        except Exception:
+            traceback.print_exc()
+    if pp:
+        try:
+            ok = push_pushplus(pp, title, md) or ok
+            log("PushPlus 推送已发送")
+        except Exception:
+            traceback.print_exc()
+    return ok
+
 # ---------------------------------------------------------------- 主流程
 
 def main():
@@ -808,11 +1007,22 @@ def main():
                     help="morning=晨报(16h) evening=晚报(9h)")
     ap.add_argument("--hours", type=int, help="自定义回溯小时数")
     ap.add_argument("--test", action="store_true", help="只生成不推送")
+    ap.add_argument("--out-only", action="store_true",
+                    help="只生成（简报 + 中文全文网页），保存 digests/pending.*，不推送")
+    ap.add_argument("--push-file", metavar="JSON",
+                    help="推送之前 --out-only 生成的简报（参数为 digests/pending.json）")
     ap.add_argument("--config", default="config.json",
                     help="配置文件名（默认 config.json，云端用 config.cloud.json）")
     args = ap.parse_args()
 
     cfg = json.loads((BASE / args.config).read_text(encoding="utf-8"))
+
+    # --push-file：推送之前生成好的简报（云端先发布网页再推送，避免链接 404）
+    if args.push_file:
+        meta = json.loads((BASE / args.push_file).read_text(encoding="utf-8"))
+        md = (BASE / meta["file"]).read_text(encoding="utf-8")
+        sys.exit(0 if do_push(cfg, meta["title"], md) else 2)
+
     if args.hours:
         hours = args.hours
     elif args.mode == "morning":
@@ -827,53 +1037,43 @@ def main():
     log(f"开始抓取（回溯 {hours} 小时）…")
     pool = collect(cfg)
     log(f"去重后共 {len(pool)} 条，开始过滤生成简报")
-    want_ex = cfg.get("fetch_excerpts", True)
     want_tr = cfg.get("translate", True)
-    opener = build_opener(cfg.get("proxy") or None) if (want_ex or want_tr) else None
+    opener = build_opener(cfg.get("proxy") or None)  # 抓正文/日历/翻译都需要
     cal_md = ""
     if cfg.get("calendar", True) and opener is not None:
         cal_md = fetch_calendar(opener)
+    pages_base = cfg.get("pages_base", "") or os.environ.get("PAGES_BASE", "")
     md = build_digest(pool, hours, mode_label,
                       cfg.get("max_per_section", 6), cfg.get("max_total", 24),
-                      opener=opener, fetch_excerpts=want_ex,
-                      translate_on=want_tr,
-                      body_chars=cfg.get("body_chars", 320),
-                      calendar_md=cal_md)
+                      opener=opener, translate_on=want_tr,
+                      summary_chars=cfg.get("summary_chars", 130),
+                      calendar_md=cal_md, pages_base=pages_base,
+                      max_overview=cfg.get("max_overview", 8))
 
     digests = BASE / "digests"
     digests.mkdir(exist_ok=True)
-    fname = digests / f"digest_{now_cn().strftime('%Y%m%d_%H%M')}.md"
+    stamp = now_cn().strftime("%Y%m%d_%H%M")
+    fname = digests / f"digest_{stamp}.md"
     fname.write_text(md, encoding="utf-8")
     log(f"简报已保存: {fname}")
+
+    title = f"期货外盘{mode_label} {now_cn().strftime('%m-%d %H:%M')}"
 
     if args.test:
         print("\n" + "=" * 60 + "\n")
         print(md)
         return
 
-    # 推送 key：环境变量优先（云端部署），其次配置文件（本机运行）
-    sc_key = os.environ.get("SERVERCHAN_KEY") or cfg.get("push", {}).get("serverchan_key", "")
-    pp_token = os.environ.get("PUSHPLUS_TOKEN") or cfg.get("push", {}).get("pushplus_token", "")
-    if not sc_key and not pp_token:
-        print("未配置推送 key（环境变量 SERVERCHAN_KEY/PUSHPLUS_TOKEN 或 config.json -> push），"
-              "本次只保存了文件未推送。请先运行 --test 查看效果，再配置推送。", file=sys.stderr)
-        sys.exit(1)
+    if args.out_only:
+        # 保存待推送清单：工作流先 commit&push 中文网页（GitHub Pages 构建），再回头推送
+        (digests / "pending.md").write_text(md, encoding="utf-8")
+        (digests / "pending.json").write_text(
+            json.dumps({"title": title, "file": "digests/pending.md",
+                        "stamp": stamp}, ensure_ascii=False), encoding="utf-8")
+        log("已保存 digests/pending.md + pending.json（等待网页发布后推送）")
+        return
 
-    title = f"期货外盘{mode_label} {now_cn().strftime('%m-%d %H:%M')}"
-    ok = False
-    if sc_key:
-        try:
-            ok = push_serverchan(sc_key, title, md) or ok
-            log("Server酱 推送已发送")
-        except Exception:
-            traceback.print_exc()
-    if pp_token:
-        try:
-            ok = push_pushplus(pp_token, title, md) or ok
-            log("PushPlus 推送已发送")
-        except Exception:
-            traceback.print_exc()
-    sys.exit(0 if ok else 2)
+    sys.exit(0 if do_push(cfg, title, md) else 2)
 
 
 if __name__ == "__main__":

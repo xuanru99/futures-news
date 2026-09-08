@@ -7,7 +7,16 @@ on:
   schedule:
     - cron: "0 0 * * *"
     - cron: "0 9 * * *"
-  workflow_dispatch: {}   # 允许在 GitHub 页面手动点 Run workflow 测试
+  workflow_dispatch:          # 允许在 GitHub 页面手动 Run workflow 测试
+    inputs:
+      mode:
+        description: "morning=晨报(回溯16h) evening=晚报(回溯9h)"
+        type: choice
+        default: morning
+        options: [morning, evening]
+
+permissions:
+  contents: write             # 允许把生成的中文全文网页 commit 回仓库（GitHub Pages 托管）
 
 jobs:
   push-news:
@@ -19,23 +28,42 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run morning digest
-        if: github.event.schedule == '0 0 * * *'
-        env:
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python news_bot.py --config config.cloud.json morning
+      - name: Decide mode
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 9 * * *" ]; then
+            echo "MODE=evening" >> "$GITHUB_ENV"
+          else
+            echo "MODE=${{ github.event.inputs.mode || 'morning' }}" >> "$GITHUB_ENV"
+          fi
 
-      - name: Run evening digest
-        if: github.event.schedule == '0 9 * * *'
-        env:
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python news_bot.py --config config.cloud.json evening
+      # 1) 生成简报 + 每条新闻的中文全文网页（docs/articles/日期/xx.html），不推送
+      - name: Generate digest and Chinese article pages
+        run: python news_bot.py --config config.cloud.json --out-only "$MODE"
 
-      - name: Run manual test (morning by default)
-        if: github.event_name == 'workflow_dispatch'
+      # 2) 把中文网页 commit 回 main 分支，GitHub Pages 自动构建发布
+      - name: Publish article pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/articles
+          if git diff --cached --quiet; then
+            echo "本次没有新的中文全文网页"
+          else
+            git commit -m "docs: 中文全文网页 $(date -u +'%Y-%m-%d %H:%M') UTC"
+            git push origin HEAD:main
+          fi
+
+      # 3) 等 GitHub Pages 构建生效（通常 30-90 秒），避免推送出去的链接 404
+      - name: Wait for GitHub Pages build
+        run: |
+          echo "等待 GitHub Pages 构建生效…"
+          sleep 75
+
+      # 4) 推送简报到微信（支持多个 Server酱 key = 多个微信）
+      - name: Push digest to WeChat
         env:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SERVERCHAN_KEY_2: ${{ secrets.SERVERCHAN_KEY_2 }}
+          SERVERCHAN_KEYS: ${{ secrets.SERVERCHAN_KEYS }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python news_bot.py --config config.cloud.json morning
+        run: python news_bot.py --config config.cloud.json --push-file digests/pending.json

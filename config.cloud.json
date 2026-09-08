@@ -5,10 +5,11 @@
     "pushplus_token": ""
   },
   "proxy": "",
-  "fetch_excerpts": true,
   "translate": true,
   "calendar": true,
-  "body_chars": 320,
+  "pages_base": "https://xuanru99.github.io/futures-news",
+  "summary_chars": 130,
+  "max_overview": 8,
   "max_per_section": 6,
   "max_total": 24,
   "feeds": [
