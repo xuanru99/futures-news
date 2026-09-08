@@ -8,8 +8,9 @@ Mining.com / World Grain 等），按主题分类去重，机器翻译成中文�
 生成"今日要点速览 + 分板块中文化全文简报"，推送到微信（Server酱 / PushPlus）。
 
 简报结构：
-    1. 今日要点速览 —— 按重大性打分（地缘/天气/行情剧变/央行/供需）挑出的大事，一句话中文概括
-    2. 分板块详情 —— 每条：中文标题 + 中文正文摘录（前 N 条）+ 原始英文链接
+    1. 今日要点速览 —— 按重大性打分（地缘/天气/行情剧变/央行/供需）挑出的大事，带星级，绝不重复
+    2. 财经日历 —— 今明两天重要事件，同国家同指标族合并成一条，带实际值/预期值/前值
+    3. 分板块详情 —— 每条：中文标题 + 中文正文（内联直读，无需点链接）+ 英文原文链接（附在条目末尾）
 
 翻译：主通道 Google 翻译免费接口（GitHub Actions 美国机房可用），
       兜底 MyMemory（本机/云端都可用，免费额度有限）。翻译失败自动回退英文原文。
@@ -116,7 +117,31 @@ NOISE_DROP = re.compile(
     r"olympic\w*|asian games|world cup|k-pop|kpop|pop star|pop group|"
     r"actor|actress|celebrity|singer|film|movie|drama series|variety show|"
     r"prosecutor\w*|prison|jailed|sentenced|sexual assault|murder|"
-    r"kidnapping|robbery|indicted)\b", re.I)
+    r"kidnapping|robbery|indicted|museum|heist|painting|sculpture|"
+    r"art theft|art gallery|art world|art market|stolen|thieves|thief|"
+    r"burglar\w*|vandalis\w*|picasso|monet|renoir|vermeer|jewel\w* theft)\b",
+    re.I)
+# 中文噪音（GNews-CN 等中文源）：博物馆盗窃 / 娱乐八卦 / 体育社会新闻
+NOISE_DROP_ZH = re.compile(
+    r"博物馆|盗窃|抢劫|小偷|名画|艺术品|画展|拍卖行|明星|演员|歌手|电影|票房|"
+    r"电视剧|综艺|足球|篮球|棒球|排球|奥运|亚运|世界杯|演唱会|导演|出轨|离婚|"
+    r"文学奖|小说|游戏|电竞|旅游|美食")
+
+# 中文关键词分类（中文标题专用，配合 GNews-CN 源）
+KEYWORDS_ZH = {
+    "energy": r"原油|油价|石油|欧佩克|OPEC|天然气|LNG|柴油|汽油|炼油|燃油|"
+              r"油品|油田|钻井|油轮|EIA|API库存",
+    "metals": r"黄金|白银|铜价|电解铜|铝价|镍|锌|铁矿石|铁矿|锂|钴|钢铁|"
+              r"贵金属|基本金属|LME|矿业|金价",
+    "agri":   r"大豆|豆粕|豆油|玉米|小麦|棉花|白糖|咖啡|可可|棕榈油|农产品|"
+              r"粮食|干旱|洪涝|霜冻|厄尔尼诺|拉尼娜|美国农业部|播种|收割|产量",
+    "macro":  r"美联储|加息|降息|利率|通胀|CPI|PPI|PCE|GDP|关税|制裁|央行|"
+              r"美元|日元|欧元|人民币|国债|收益率|制造业|PMI|中国|美国|日本|"
+              r"韩国|欧元区|港股|恒生|地缘|贸易战|非农|就业",
+    "other":  r"大宗商品|期货|库存|供给|需求|航运|运价|美股|A股|股市|股票|"
+              r"标普|纳斯达克|道琼斯|供应|波罗的海",
+}
+_COMPILED_ZH = {t: re.compile(p) for t, p in KEYWORDS_ZH.items()}
 
 # ---------------------------------------------------------------- 重大性打分（"今日要点速览"用）
 # (类别, 权重, 关键词正则)：命中的新闻进入"今日要点"候选，权重高者优先入选
@@ -207,6 +232,8 @@ def classify(title):
     best, best_hits = None, 0
     for topic in ("energy", "metals", "agri", "macro", "other"):
         hits = sum(1 for p in _COMPILED[topic] if p.search(title))
+        if _COMPILED_ZH[topic].search(title):  # 中文关键词命中
+            hits += 1
         if hits > best_hits:
             best, best_hits = topic, hits
     return best if best_hits > 0 else None
@@ -304,20 +331,21 @@ def collect(cfg):
                 continue
             if FOREX_DROP.search(title):
                 continue  # 纯外汇货币对分析，与商品期货无关
-            if NOISE_DROP.search(title):
-                continue  # 体育/娱乐/社会案件类噪音
+            if NOISE_DROP.search(title) or NOISE_DROP_ZH.search(title):
+                continue  # 体育/娱乐/社会案件类噪音（中英文）
             # 模糊去重：与已收录标题相似度 > 0.8 视为同一事件（仅留最新一条）
             if any(difflib.SequenceMatcher(None, k, norm_key(t)).ratio() > 0.8
                    for t in kept_titles):
                 continue
             seen.add(k)
             kept_titles.append(title)
-            topic = classify(title) or feed.get("topic") or "other"
-            if feed.get("strict") and classify(title) is None:
-                continue  # 严格源：关键词不命中就丢弃（过滤生活方式类内容）
+            desc_txt = _usable_desc(desc)
+            # 相关性总门槛：标题/描述都与宏观、商品、市场无关的新闻直接丢弃
+            topic = classify(title) or classify(desc_txt)
+            if topic is None:
+                continue
             pool.append({"title": title, "link": link, "dt": dt,
-                         "src": src, "topic": topic,
-                         "desc": _usable_desc(desc)})
+                         "src": src, "topic": topic, "desc": desc_txt})
             added += 1
         log(f"抓取成功 {feed['name']}: {len(rows)} 条, 新增 {added}")
     return pool
@@ -528,10 +556,29 @@ WSCN_CAL_URL = "https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas"
 CAL_COMMO_KW = re.compile(r"原油|库存|EIA|OPEC|天然气|农产品|大豆|玉米|小麦|铜|铝|"
                           r"锌|镍|铁矿石|黄金|PMI|CPI|PPI|PCE|非农|就业|失业|零售|"
                           r"GDP|贸易|进出口|社融|M2|美联储|利率", re.I)
+# 指标族：同一国家同族指标（如日本 GDP 系列的多个分项）合并为一行，不重复罗列
+_CAL_FAMILY = [
+    ("GDP", re.compile(r"GDP|国内生产总值|平减指数|经济增速")),
+    ("物价", re.compile(r"CPI|PPI|PCE|通胀|物价|消费者价格|生产者价格")),
+    ("利率", re.compile(r"利率|LPR|降息|加息|货币政策|决议")),
+    ("就业", re.compile(r"非农|就业|失业|职位|劳工|初请|薪资")),
+    ("PMI", re.compile(r"PMI|采购经理人")),
+    ("消费", re.compile(r"零售|消费者信心|消费")),
+    ("贸易", re.compile(r"贸易|进出口|出口|进口|顺差|逆差|贸易帐")),
+]
+# 个股层面的事件（上市/挂牌/IPO）不是宏观大事，丢弃
+_CAL_DROP = re.compile(r"上市|挂牌|新股|IPO|停牌|复牌")
 
 
-def fetch_calendar(opener, days=2, limit=14):
-    """返回格式化好的财经日历文本块；失败返回空串（不影响简报生成）。"""
+def _cal_family(title):
+    for name, pat in _CAL_FAMILY:
+        if pat.search(title):
+            return name
+    return None
+
+
+def fetch_calendar(opener, days=2, limit=12):
+    """财经日历：同一国家同一指标族合并成一条，带实际值/预期值/前值；失败返回空串。"""
     try:
         t0 = now_cn().replace(hour=0, minute=0, second=0, microsecond=0)
         start, end = int(t0.timestamp()), int(t0.timestamp()) + days * 86400
@@ -550,25 +597,53 @@ def fetch_calendar(opener, days=2, limit=14):
         except (TypeError, ValueError):
             continue
         if imp >= 3 or (imp == 2 and CAL_COMMO_KW.search(it.get("title") or "")):
-            picked.append(it)
-    picked.sort(key=lambda x: x.get("public_date") or 0)
+            if not _CAL_DROP.search(it.get("title") or ""):
+                picked.append(it)
     if not picked:
         return ""
+    # 分组：同国家 + 同指标族（或独立事件标题）
+    groups = {}
+    for it in picked:
+        title = (it.get("title") or "").strip()
+        fam = _cal_family(title)
+        key = (it.get("country") or "", fam) if fam else (it.get("country") or "", title)
+        groups.setdefault(key, []).append(it)
+
+    def group_key(grp):
+        return (-max(int(i.get("importance") or 0) for i in grp),
+                min(i.get("public_date") or 0 for i in grp))
+
     lines = []
-    for it in picked[:limit]:
+    for grp in sorted(groups.values(), key=group_key)[:limit]:
+        grp.sort(key=lambda x: x.get("public_date") or 0)
+        head = grp[0]
+        country = (head.get("country") or "").strip()
+        title = (head.get("title") or "").strip()
+        fam = _cal_family(title)
         try:
-            tm = datetime.fromtimestamp(it["public_date"], CN_TZ).strftime("%m-%d %H:%M")
+            tm = datetime.fromtimestamp(head["public_date"], CN_TZ).strftime("%m-%d %H:%M")
         except (KeyError, TypeError, ValueError, OSError):
             continue
-        stars = "★" * int(it.get("importance") or 0)
-        extra = []
-        if it.get("forecast"):
-            extra.append(f"预期 {it['forecast']}")
-        if it.get("previous"):
-            extra.append(f"前值 {it['previous']}")
-        tail = ("（" + "，".join(extra) + "）") if extra else ""
-        lines.append(f"- **{tm}**【{it.get('country', '')}】{it.get('title', '')} {stars}{tail}")
-    log(f"财经日历：{len(picked)} 个重要事件（{days} 天内）")
+        stars = "★" * int(head.get("importance") or 0)
+        # 每个分项去掉国家前缀后带上数值信息
+        parts = []
+        for it in grp[:3]:
+            t = (it.get("title") or "").strip()
+            if country and t.startswith(country):
+                t = t[len(country):].lstrip(" ：:")
+            vals = []
+            if str(it.get("actual") or "").strip():
+                vals.append(f"公布 {it['actual']}")
+            if str(it.get("forecast") or "").strip():
+                vals.append(f"预期 {it['forecast']}")
+            if str(it.get("previous") or "").strip():
+                vals.append(f"前值 {it['previous']}")
+            if vals:
+                t += "（" + "，".join(vals) + "）"
+            parts.append(t)
+        label = fam or "事件"
+        lines.append(f"- **{tm}** {stars}【{country}】**{label}**：" + "；".join(parts))
+    log(f"财经日历：{len(picked)} 个事件合并为 {len(lines)} 条（{days} 天内）")
     return "\n".join(lines)
 
 # ---------------------------------------------------------------- 简报生成
@@ -582,7 +657,7 @@ def _trim_zh(text, limit):
 
 def build_digest(pool, hours, mode_label, max_per_section, max_total,
                  opener=None, fetch_excerpts=True, translate_on=True,
-                 body_chars=150, body_per_section=4, calendar_md=""):
+                 body_chars=320, calendar_md=""):
     cutoff = now_cn() - timedelta(hours=hours)
     fresh = [x for x in pool if x["dt"] is None or x["dt"] >= cutoff]
     fresh.sort(key=lambda x: x["dt"] or now_cn(), reverse=True)
@@ -623,6 +698,9 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
         texts = []
         for x in selected:
             src = excerpts.get(x["link"], "") or x.get("desc", "")
+            t = x["title"]
+            if src[:len(t)] == t:  # 正文开头重复了标题，剥掉
+                src = src[len(t):].lstrip(" -–—:,.，")
             x["body_en"] = src[:600]
             texts.append(x["title"])
             if x["body_en"]:
@@ -636,29 +714,35 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
             x["title_zh"] = tr.get(x["title"]) or x["title"]
             x["body_zh"] = tr.get(x["body_en"], "") if x["body_en"] else ""
 
-    # 今日要点速览：重大性打分（>=2 分入选），每类别最多 2 条，总共最多 8 条
+    # 今日要点速览：重大性打分（>=2 分入选），每类别最多 2 条，总共最多 8 条；
+    # 同一事件的不同表述（相似度 > 0.6）只保留分数最高的一条，绝不重复
     scored = []
     for x in selected:
         s, cats = importance(x["title"])
         if s >= 2:
             scored.append((s, cats, x))
     scored.sort(key=lambda r: (-r[0], -(r[2]["dt"] or now_cn()).timestamp()))
-    overview, cat_count = [], {}
+    overview, cat_count, seen_keys = [], {}, []
     for s, cats, x in scored:
         if len(overview) >= 8:
             break
         if any(cat_count.get(c, 0) >= 2 for c in cats):
             continue
+        k = norm_key(x["title"])
+        if any(difflib.SequenceMatcher(None, k, sk).ratio() > 0.6 for sk in seen_keys):
+            continue  # 同一事件不同报道，只留一条
+        seen_keys.append(k)
         for c in cats:
             cat_count[c] = cat_count.get(c, 0) + 1
-        overview.append((cats[0], x))
+        overview.append((cats[0], s, x))
 
-    def render(bps):
+    def render(bchars):
         lines = []
         lines.append("\n## 📌 今日要点速览\n")
         if overview:
-            for i, (cat, x) in enumerate(overview, 1):
-                lines.append(f"**{i}.【{cat}】{_trim_zh(x['title_zh'], 46)}** "
+            for i, (cat, s, x) in enumerate(overview, 1):
+                stars = "★★★" if s >= 5 else ("★★" if s >= 3 else "★")
+                lines.append(f"**{i}.【{cat}】{stars} {_trim_zh(x['title_zh'], 46)}** "
                              f"—— [阅读原文]({x['link']})")
         else:
             lines.append("（本时段没有命中的重大事件，详见下方分板块简报）")
@@ -675,11 +759,10 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
                 count += 1
                 tm = x["dt"].strftime("%H:%M") if x["dt"] else "--:--"
                 lines.append(f"**{i + 1}. {tm}【{x['src']}】{x['title_zh']}**")
-                if x["body_zh"] and i < bps:
-                    lines.append(f"\n{_trim_zh(x['body_zh'], body_chars)}")
-                    lines.append(f"\n> 原文：{x['title']}\n> [阅读英文原文]({x['link']})")
-                else:
-                    lines.append(f"[阅读原文]({x['link']})")
+                body = (x["body_zh"] or x.get("body_en") or "").strip()
+                if bchars > 0 and body:
+                    lines.append(f"\n{_trim_zh(body, bchars)}")
+                lines.append(f"\n> [英文原文]({x['link']})")
                 lines.append("")
         if count == 0:
             lines.append("\n（本次时间窗口内没有抓到符合条件的新闻）")
@@ -690,14 +773,14 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
         f"> 回溯最近 **{hours} 小时** · 共 **{total}** 条 · 全文中文摘要版 · "
         f"来源：Reuters / Bloomberg / FT / WSJ / CNBC / EIA / OPEC / Argus / Platts 等\n"
     )
-    # 推送长度保护：Server酱上限约 32KB，超长时逐级减少带正文的条数
-    bps = body_per_section
+    # 推送长度保护：Server酱上限约 32KB，超长时逐级压缩每条正文字数
+    bchars = body_chars
     while True:
-        md = head + "\n".join(render(bps)) + "\n"
-        if len(md.encode("utf-8")) <= 30000 or bps <= 0:
+        md = head + "\n".join(render(bchars)) + "\n"
+        if len(md.encode("utf-8")) <= 30000 or bchars <= 80:
             break
-        bps -= 1
-        log(f"简报超长，压缩正文条数至每板块 {bps} 条")
+        bchars = max(80, bchars - 100)
+        log(f"简报超长，压缩每条正文字数至 {bchars}")
     return md
 
 # ---------------------------------------------------------------- 推送
@@ -751,11 +834,10 @@ def main():
     if cfg.get("calendar", True) and opener is not None:
         cal_md = fetch_calendar(opener)
     md = build_digest(pool, hours, mode_label,
-                      cfg.get("max_per_section", 8), cfg.get("max_total", 30),
+                      cfg.get("max_per_section", 6), cfg.get("max_total", 24),
                       opener=opener, fetch_excerpts=want_ex,
                       translate_on=want_tr,
-                      body_chars=cfg.get("body_chars", 150),
-                      body_per_section=cfg.get("body_per_section", 4),
+                      body_chars=cfg.get("body_chars", 320),
                       calendar_md=cal_md)
 
     digests = BASE / "digests"

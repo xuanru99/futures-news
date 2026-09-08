@@ -8,10 +8,9 @@
   "fetch_excerpts": true,
   "translate": true,
   "calendar": true,
-  "body_chars": 150,
-  "body_per_section": 4,
-  "max_per_section": 8,
-  "max_total": 30,
+  "body_chars": 320,
+  "max_per_section": 6,
+  "max_total": 24,
   "feeds": [
     { "name": "WSJ-World",   "topic": "macro",  "enabled": true,  "url": "https://feeds.content.dowjones.io/public/rss/RSSWorldNews" },
     { "name": "WSJ-Markets", "topic": "other",  "enabled": true,  "strict": true, "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain" },
