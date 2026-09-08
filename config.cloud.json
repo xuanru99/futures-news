@@ -5,12 +5,17 @@
     "pushplus_token": ""
   },
   "proxy": "",
+  "fetch_excerpts": true,
+  "translate": true,
+  "calendar": true,
+  "body_chars": 150,
+  "body_per_section": 4,
   "max_per_section": 8,
-  "max_total": 45,
+  "max_total": 30,
   "feeds": [
     { "name": "WSJ-World",   "topic": "macro",  "enabled": true,  "url": "https://feeds.content.dowjones.io/public/rss/RSSWorldNews" },
     { "name": "WSJ-Markets", "topic": "other",  "enabled": true,  "strict": true, "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain" },
-    { "name": "CNBC-Economy","topic": "macro",  "enabled": true,  "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114" },
+    { "name": "CNBC-Economy","topic": "macro",  "enabled": true,  "strict": true, "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114" },
     { "name": "CNBC-Markets","topic": "other",  "enabled": true,  "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258" },
     { "name": "MW-Top",      "topic": "other",  "enabled": true,  "strict": true, "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories" },
     { "name": "MW-Pulse",    "topic": "macro",  "enabled": true,  "url": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse" },
@@ -24,6 +29,26 @@
     { "name": "GNews-Metals","topic": "metals", "enabled": true,  "url": "https://news.google.com/rss/search?q=gold+OR+copper+OR+metals+prices&hl=en-US&gl=US&ceid=US:en" },
     { "name": "GNews-Agri",  "topic": "agri",   "enabled": true,  "url": "https://news.google.com/rss/search?q=soybeans+OR+corn+OR+wheat+OR+grain&hl=en-US&gl=US&ceid=US:en" },
     { "name": "Bloomberg-Markets", "topic": "other", "enabled": true, "url": "https://feeds.bloomberg.com/markets/news.rss" },
-    { "name": "Bloomberg-Econ",    "topic": "macro", "enabled": true, "url": "https://feeds.bloomberg.com/economics/news.rss" }
+    { "name": "Bloomberg-Econ",    "topic": "macro", "enabled": true, "url": "https://feeds.bloomberg.com/economics/news.rss" },
+
+    { "name": "FT-Markets",   "topic": "other",  "enabled": true, "url": "https://www.ft.com/markets?format=rss" },
+    { "name": "FT-Commodities","topic": "other", "enabled": true, "url": "https://www.ft.com/commodities?format=rss" },
+    { "name": "FT-GlobalEcon","topic": "macro",  "enabled": true, "url": "https://www.ft.com/global-economy?format=rss" },
+    { "name": "Reuters-Commodities", "topic": "other",  "enabled": true, "url": "https://news.google.com/rss/search?q=when:24h+site:reuters.com+commodities+OR+oil+OR+gold+OR+grain&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "Reuters-Macro",       "topic": "macro",  "enabled": true, "url": "https://news.google.com/rss/search?q=when:24h+site:reuters.com+(fed+OR+inflation+OR+tariff+OR+china)&hl=en-US&gl=US&ceid=US:en" },
+
+    { "name": "Nikkei-Asia",  "topic": "macro",  "enabled": true, "strict": true, "url": "https://asia.nikkei.com/rss/feed/nar" },
+    { "name": "Yonhap",       "topic": "macro",  "enabled": true, "strict": true, "url": "https://en.yna.co.kr/RSS/news.xml" },
+    { "name": "SeekingAlpha", "topic": "other",  "enabled": true, "strict": true, "url": "https://seekingalpha.com/market_currents.xml" },
+    { "name": "GNews-HK",     "topic": "macro",  "enabled": true, "url": "https://news.google.com/rss/search?q=when:24h+(HKEX+OR+%22Hong+Kong+stock%22+OR+%22Hang+Seng%22)&hl=en-US&gl=US&ceid=US:en" },
+
+    { "name": "EIA-Press",    "topic": "energy", "enabled": true, "url": "https://www.eia.gov/rss/press_rss.xml" },
+    { "name": "EIA-Today",    "topic": "energy", "enabled": true, "url": "https://www.eia.gov/rss/todayinenergy.xml" },
+    { "name": "GNews-OPEC",   "topic": "energy", "enabled": true, "url": "https://news.google.com/rss/search?q=when:48h+OPEC+(cut+OR+quota+OR+output+OR+meeting+OR+report)&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-API",    "topic": "energy", "enabled": true, "url": "https://news.google.com/rss/search?q=when:48h+%22American+Petroleum+Institute%22&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-Argus",  "topic": "energy", "enabled": true, "url": "https://news.google.com/rss/search?q=when:48h+(site:argusmedia.com+OR+%22Argus+Media%22)&hl=en-US&gl=US&ceid=US:en" },
+    { "name": "GNews-Platts", "topic": "energy", "enabled": true, "url": "https://news.google.com/rss/search?q=when:48h+(%22S%26P+Global+Platts%22+OR+%22Platts+assessed%22)&hl=en-US&gl=US&ceid=US:en" },
+
+    { "name": "GNews-CN",     "topic": "macro",  "enabled": true, "url": "https://news.google.com/rss/search?q=when:24h+(%E5%A4%A7%E5%AE%97%E5%95%86%E5%93%81+OR+%E6%9C%9F%E8%B4%A7+OR+%E5%8E%9F%E6%B2%B9+OR+%E9%93%81%E7%9F%BF%E7%9F%B3)&hl=zh-CN&gl=CN&ceid=CN:zh-Hans" }
   ]
 }
