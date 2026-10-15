@@ -61,6 +61,27 @@ TOPIC_ORDER = ["macro", "energy", "metals", "agri", "other"]
 # 必收源（一手权威财经媒体）：WSJ / Bloomberg 的新闻不做相关性筛选，全部收录，
 # 跨源同事件去重时也优先保留必收源版本。仅极端社会/娱乐噪音仍会被滤掉。
 MUST_PREFIXES = ("WSJ", "Bloomberg")
+
+# 必收源的二级负向过滤：WSJ-World 等综合源会带入大量与期货/宏观经济完全无关的
+# 本地新闻（美国地方治安、生活方式、名人八卦等），用此规则兜底滤掉。
+# 原则：只滤"明显无关"，宁可多留不错杀。
+MUST_EXCLUDE = re.compile(
+    r"\b(obituary|wedding|engagement|baby shower|birthday party|"
+    r"recipe|restaurant (review|opening)|hotel (opening|deal)|fashion (week|show|trend)|"
+    r"dog (show|adoption)|cat (video|rescue)|pet (adoption|photo)|"
+    r"viral (video|tweet|post)|tiktok (challenge|trend)|instagram (reel|story)|"
+    r"influencer (marketing|deal)|celebrity (interview|news|gossip)|"
+    r"lottery|powerball|mega millions|school (district|board|council)|"
+    r"city council|mayor (race|election|debate)|park (closure|opening)|"
+    r"(local|neighborhood) (news|crime|police|fire|hospital)|"
+    r"traffic (alert|delay|closure)|road (closure|work)|weather (forecast|alert|warning)|"
+    r"police chase|active shooter|amber alert|missing (person|child)|"
+    r"(house|home) (of the day|tour|design|interior)|real estate (market|listing)|"
+    r"car (review|deal|recall)|auto (show|dealer)|"
+    r"best (sellers|restaurants|hotels|cities|schools)|top 10 (places|movies|songs)|"
+    r"^opinion\s*\|\s*(how to|why i|my|what if|the case for|the problem with)\b|"
+    r"jihadist|martyr|lindsey graham|diesel insult)\b",
+    re.I)
 TOPIC_CN = {
     "macro": "宏观 / 央行 / 地缘",
     "energy": "能源化工（原油 / 天然气）",
@@ -130,13 +151,24 @@ NOISE_DROP = re.compile(
     r"prosecutor\w*|prison|jailed|sentenced|sexual assault|murder|"
     r"kidnapping|robbery|indicted|museum|heist|painting|sculpture|"
     r"art theft|art gallery|art world|art market|stolen|thieves|thief|"
-    r"burglar\w*|vandalis\w*|picasso|monet|renoir|vermeer|jewel\w* theft)\b",
+    r"burglar\w*|vandalis\w*|picasso|monet|renoir|vermeer|jewel\w* theft|"
+    r"lottery|powerball|mega millions|obituary|wedding|royal baby|"
+    r"dog show|cat video|viral video|tiktok trend|instagram|influencer|"
+    r"recipe|restaurant review|travel guide|hotel opening|fashion week|"
+    r"local school|school district|city council|mayor election|park closure|"
+    r"traffic alert|weather forecast|road closure|police chase|shooting|"
+    r"arrested|lawsuit (over|against)|divorce settlement|celebrity divorce)\b",
     re.I)
-# 中文噪音（GNews-CN 等中文源）：博物馆盗窃 / 娱乐八卦 / 体育社会新闻
+# 中文噪音（GNews-CN 等中文源）：博物馆盗窃 / 娱乐八卦 / 体育社会新闻 / 本地民生
 NOISE_DROP_ZH = re.compile(
     r"博物馆|盗窃|抢劫|小偷|名画|艺术品|画展|拍卖行|明星|演员|歌手|电影|票房|"
     r"电视剧|综艺|足球|篮球|棒球|排球|奥运|亚运|世界杯|演唱会|导演|出轨|离婚|"
-    r"文学奖|小说|游戏|电竞|旅游|美食")
+    r"文学奖|小说|游戏|电竞|旅游|美食|"
+    r"彩票|中奖|交通事故|堵车|限行|开学|放假|高考|中考|"
+    r"天气预报|气温|降温|降雨|台风|暴雨|景区|游客|"
+    r"网红|直播带货|选秀|综艺|偶像|粉丝|追星|"
+    r"本地新闻|社区|街道办|城管|违章|停车|物业|小区|"
+    r"寻人|寻物|失物招领|领养|救助|捐赠|慈善")
 
 # 中文关键词分类（中文标题专用，配合 GNews-CN 源）
 KEYWORDS_ZH = {
@@ -362,7 +394,10 @@ def collect(cfg):
             if NOISE_DROP.search(title) or NOISE_DROP_ZH.search(title):
                 continue  # 体育/娱乐/社会案件类噪音（中英文），必收源同样滤掉
             if must_src:
-                # WSJ / Bloomberg：不做关键词筛选与跨源模糊去重，全部收录
+                # WSJ / Bloomberg：二级负向过滤（本地生活/娱乐/治安等明显无关新闻）
+                if MUST_EXCLUDE.search(title):
+                    continue
+                # 不做关键词筛选与跨源模糊去重，全部收录
                 seen.add(k)
                 kept_titles.append((title, True))
                 topic = classify(title) or classify(_usable_desc(desc)) or "macro"
@@ -445,11 +480,11 @@ def _junk_para(t):
         return True
     stops = sum(1 for w in words if w.lower() in _STOPS)
     nums = sum(1 for w in words if re.match(r"^[\d$+.%•:-]+$", w))
-    if n > 40 and stops / n < 0.12:      # 导航/标签云：几乎没有虚词
+    if n > 50 and stops / n < 0.08:      # 导航/标签云：几乎没有虚词（放宽阈值）
         return True
-    if n > 15 and nums / n > 0.3:        # 行情数字表
+    if n > 20 and nums / n > 0.4:        # 行情数字表（放宽）
         return True
-    if t.count("%") >= 3:
+    if t.count("%") >= 5:                # 百分比过多（放宽）
         return True
     return False
 
@@ -474,8 +509,9 @@ def _resolve_google_news(opener, link, timeout=10):
         return ""
 
 
-def fetch_full_article(opener, link, timeout=12, max_chars=15000, max_paras=80):
+def fetch_full_article(opener, link, timeout=20, max_chars=25000, max_paras=120):
     """抓原文页面，提取整篇正文段落（用于全文翻译）。
+    多策略提取：JSON-LD articleBody → <article> 标签 → <p> 段落 → meta 描述。
     返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。"""
     real_link = _resolve_google_news(opener, link)
     if not real_link:
@@ -489,18 +525,44 @@ def fetch_full_article(opener, link, timeout=12, max_chars=15000, max_paras=80):
     # 剥掉脚本 / 样式 / 导航页脚等非正文块
     body = re.sub(r"<(script|style|nav|footer|aside|header|form)[^>]*>.*?</\1>", " ",
                   body, flags=re.S | re.I)
+
+    # 策略 1：JSON-LD 结构化数据（WSJ/FT/CNBC 等付费墙站点常在此处嵌入完整正文）
     paras = []
-    for pm in re.finditer(r"<p[^>]*>(.*?)</p>", body, re.S | re.I):
-        t = _clean_text(pm.group(1))
-        if len(t) < 40 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
-            continue
-        if paras and (t in paras[-1] or paras[-1] in t):
-            continue  # 与上一段重复
-        paras.append(t)
-        if len(paras) >= max_paras or sum(len(p) for p in paras) >= max_chars:
+    for jm in re.finditer(r'"articleBody"\s*:\s*"((?:[^"\\]|\\.)*)"', body):
+        raw = jm.group(1).replace('\\"', '"').replace('\\n', '\n')
+        for p in re.split(r'\n{2,}', raw):
+            t = _clean_text(p)
+            if len(t) >= 40 and not _PARA_CODE.search(t) and not _junk_para(t):
+                paras.append(t)
+        if paras:
             break
-    # 正文太少时，用 meta 描述（通常是导语）补一段
-    if sum(len(p) for p in paras) < 400:
+
+    # 策略 2：<article> 标签内的内容（很多新闻站用此包裹正文）
+    if not paras or sum(len(p) for p in paras) < 200:
+        am = re.search(r'<article[^>]*>(.*?)</article>', body, re.S | re.I)
+        if am:
+            for pm in re.finditer(r'<p[^>]*>(.*?)</p>', am.group(1), re.S | re.I):
+                t = _clean_text(pm.group(1))
+                if len(t) >= 40 and not _PARA_JUNK.match(t) and not _PARA_CODE.search(t) and not _junk_para(t):
+                    if paras and (t in paras[-1] or paras[-1] in t):
+                        continue
+                    paras.append(t)
+
+    # 策略 3：全页面 <p> 段落（兜底）
+    if not paras or sum(len(p) for p in paras) < 200:
+        paras = []
+        for pm in re.finditer(r"<p[^>]*>(.*?)</p>", body, re.S | re.I):
+            t = _clean_text(pm.group(1))
+            if len(t) < 40 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
+                continue
+            if paras and (t in paras[-1] or paras[-1] in t):
+                continue
+            paras.append(t)
+            if len(paras) >= max_paras or sum(len(p) for p in paras) >= max_chars:
+                break
+
+    # 兜底：meta 描述（通常是导语）
+    if sum(len(p) for p in paras) < 100:
         m = _META_DESC_RE.search(body) or _META_DESC_RE2.search(body)
         if m:
             d = _clean_text(m.group(1))
@@ -768,7 +830,8 @@ def write_article_pages(selected, pages_base):
     adir = BASE / "docs" / "articles" / date_dir
     n = 0
     for x in selected:
-        if not x.get("paras_zh"):
+        # 有正文（翻译或原文）就生成页面，不因翻译失败而跳过
+        if not x.get("paras_zh") and not x.get("paras"):
             continue
         orig = x.get("real_link") or x["link"]
         slug = hashlib.md5(orig.encode("utf-8")).hexdigest()[:10]
@@ -872,7 +935,7 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
             texts.extend(x["paras"])
         uniq = list({t for t in texts if t})
         log(f"并发翻译 {len(uniq)} 段文本（标题 + 全部正文段落）…")
-        tr = translate_many(opener, uniq, workers=8)
+        tr = translate_many(opener, uniq, workers=4)
         log(f"翻译完成：成功 {sum(1 for v in tr.values() if v)}/{len(tr)}")
         for x in selected:
             x["title_zh"] = tr.get(x["title"]) or x["title"]
