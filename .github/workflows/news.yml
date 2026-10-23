@@ -1,11 +1,21 @@
 name: futures-news
 
-# 定时触发（UTC 时间；北京时间 = UTC + 8）
-#   23:30 UTC = 北京 07:30 晨报（回溯16小时，覆盖隔夜美盘）
-#   11:30 UTC = 北京 19:30 晚报（回溯12小时，与晨报无缝衔接）
+# ============================================================
+# 定时推送配置（v6 精确版）
+# ============================================================
+# GitHub Actions 使用 UTC 时间，北京时间 = UTC + 8 小时
+#
+# ✅ 晨报：UTC 23:30 → 北京 07:30（覆盖隔夜美盘 16h）
+# ✅ 晚报：UTC 11:30 → 北京 19:30（覆盖白天 12h）
+#
+# ⚠️ 注意：GitHub Actions cron 可能有 ±5 分钟延迟，属正常现象
+# ⚠️ 如果看到非上述时间的运行，那是手动触发（workflow_dispatch）
+# ============================================================
 on:
   schedule:
+    # 晨报：北京时间 07:30 = UTC 23:30（前一天晚上）
     - cron: "30 23 * * *"
+    # 晚报：北京时间 19:30 = UTC 11:30
     - cron: "30 11 * * *"
   workflow_dispatch:          # 允许在 GitHub 页面手动 Run workflow 测试
     inputs:
@@ -28,12 +38,31 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Decide mode
+      - name: Decide mode (strict time check)
         run: |
-          if [ "${{ github.event.schedule }}" = "30 11 * * *" ]; then
-            echo "MODE=evening" >> "$GITHUB_ENV"
+          echo "=== 当前 UTC 时间 ==="
+          date -u '+%Y-%m-%d %H:%M:%S UTC'
+          echo "=== 当前北京时间 ==="
+          TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST'
+          echo ""
+          
+          # 根据触发来源决定模式
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # 定时触发：根据 cron 表达式判断是晨报还是晚报
+            SCHEDULE="${{ github.event.schedule }}"
+            echo "调度表达式: ${SCHEDULE}"
+            
+            if [ "$SCHEDULE" = "30 11 * * *" ]; then
+              echo "MODE=evening" >> "$GITHUB_ENV"
+              echo "→ 晚报模式（北京 19:30）"
+            else
+              echo "MODE=morning" >> "$GITHUB_ENV"
+              echo "→ 晨报模式（北京 07:30）"
+            fi
           else
+            # 手动触发：使用输入参数或默认 morning
             echo "MODE=${{ github.event.inputs.mode || 'morning' }}" >> "$GITHUB_ENV"
+            echo "→ 手动触发，模式: $MODE"
           fi
 
       # 1) 生成简报 + 每条新闻的中文全文网页（docs/articles/日期/xx.html），不推送
