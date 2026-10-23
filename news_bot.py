@@ -494,28 +494,68 @@ def _clean_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _resolve_google_news(opener, link, timeout=10):
-    """Google News 跳转页：解出真实出版方链接；失败返回原链接。"""
-    if "news.google.com" not in urllib.parse.urlparse(link).netloc:
+def _resolve_google_news(opener, link, timeout=15):
+    """Google News 跳转页：解出真实出版方链接；失败返回原链接（不返回空串）。
+    v6 增强：多策略解析 + 失败时保留原链接让用户能点开看。"""
+    parsed = urllib.parse.urlparse(link)
+    # 非谷歌新闻链接直接返回
+    if "news.google.com" not in parsed.netloc and "google.com" not in parsed.netloc:
         return link
+
     try:
         req = urllib.request.Request(link, headers={"User-Agent": UA})
         with opener.open(req, timeout=timeout) as r:
-            body = r.read(200000).decode("utf-8", "ignore")
-        m = re.search(r'<a[^>]+href="(https?://(?!news\.google\.com|support\.google\.com|policies\.google\.com)[^"]+)"',
-                      body, re.I)
-        return htmllib.unescape(m.group(1)) if m else ""
-    except Exception:
-        return ""
+            body = r.read(300000).decode("utf-8", "ignore")
+    except Exception as e:
+        log(f"⚠️ 无法访问跳转页 {link[:80]}: {e}")
+        return link  # 返回原链接而非空串
+
+    # 策略1: <a> 标签中找非 google 域名链接
+    m = re.search(r'<a[^>]+href="(https?://(?!news\.google\.com|support\.google\.com|policies\.google\.com|www\.google\.com)[^"]+)"', body, re.I)
+    if m:
+        return htmllib.unescape(m.group(1))
+
+    # 策略2: JSON-LD 结构化数据中的 url / mainEntityOfPage
+    m = re.search(r'"(?:url|mainEntityOfPage)"\s*:\s*"(https?://[^"]+)"', body)
+    if m and "google.com" not in m.group(1):
+        return htmllib.unescape(m.group(1))
+
+    # 策略3: <link rel="canonical">
+    m = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\'](https?://[^"\']+)["\']', body, re.I)
+    if m and "google.com" not in m.group(1):
+        return htmllib.unescape(m.group(1))
+
+    # 策略4: og:url
+    m = re.search(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\'](https?://[^"\']+)["\']', body, re.I)
+    if m and "google.com" not in m.group(1):
+        return htmllib.unescape(m.group(1))
+
+    # 全部失败 → 返回原链接（至少用户能点开）
+    log(f"⚠️ 无法从跳转页解析出真实链接: {link[:80]}")
+    return link
+
+
+def _extract_rss_real_link(item_data):
+    """从 RSS item 的原始数据中尝试提取真实链接（非 Google News 跳转）。
+    某些 RSS 源会在 <guid> 或其他字段中放真实链接。"""
+    # 如果有 guid 且不是 google 链接
+    guid = item_data.get("guid") or ""
+    if guid and "google.com" not in guid:
+        return guid
+    # 如果有 source url
+    source_url = item_data.get("source_url", "")
+    if source_url and "google.com" not in source_url:
+        return source_url
+    return None
 
 
 def fetch_full_article(opener, link, timeout=20, max_chars=25000, max_paras=120):
     """抓原文页面，提取整篇正文段落（用于全文翻译）。
     多策略提取：JSON-LD articleBody → <article> 标签 → <p> 段落 → meta 描述。
-    返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。"""
+    返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。
+    v6 增强：链接解析失败不再返回空串，保证英文原文链接始终可点。"""
     real_link = _resolve_google_news(opener, link)
-    if not real_link:
-        return [], link
+    # real_link 现在保证非空（最差也是原链接）
     try:
         req = urllib.request.Request(real_link, headers={"User-Agent": UA})
         with opener.open(req, timeout=timeout) as r:
@@ -1088,6 +1128,138 @@ def do_push(cfg, title, md):
 
 # ---------------------------------------------------------------- 主流程
 
+# ====================================================================
+# Wind Alice 专业研报集成（v6 新增）
+# 对主要期货品种调用 Wind Alice 商品智研助手生成专业中文研报，
+# 弥补机器翻译不完整的问题，提供机构级专业分析。
+# 需要已安装 wind-finance 连接器或配置 API Key，未授权时自动跳过。
+# ====================================================================
+
+# 主要商品品种列表（用于生成 Wind Alice 研报）
+ALICE_COMMODITIES = [
+    ("原油", "crude oil"),
+    ("黄金", "gold"),
+    ("铜", "copper"),
+    ("大豆", "soybeans"),
+    ("螺纹钢", "rebar"),
+    ("铁矿石", "iron ore"),
+    ("PTA", "PTA"),
+    ("棕榈油", "palm oil"),
+]
+
+ALICE_SKILL_DIR = None  # 运行时检测 Wind Alice skill 路径
+
+
+def _find_alice_skill():
+    """查找 Wind Alice skill 安装路径"""
+    global ALICE_SKILL_DIR
+    if ALICE_SKILL_DIR:
+        return ALICE_SKILL_DIR
+    candidates = [
+        Path.home() / ".workbuddy/skills/alice-commodity-research-assistant",
+        BASE / "../.workbuddy/skills/alice-commodity-research-assistant",
+    ]
+    for p in candidates:
+        if (p / "scripts" / "acra.ps1").exists() or (p / "scripts" / "cli.mjs").exists():
+            ALICE_SKILL_DIR = str(p.resolve())
+            return ALICE_SKILL_DIR
+    # 也检查当前项目目录
+    local = BASE / "alice-commodity-research-assistant"
+    if (local / "scripts" / "acra.ps1").exists():
+        ALICE_SKILL_DIR = str(local.resolve())
+        return ALICE_SKILL_DIR
+    return None
+
+
+def generate_alice_report(commodity_name, timeout=120):
+    """调用 Wind Alice 生成单个品种的专业研报。
+    返回 (成功 bool, 报告文本 str)。
+    失败时返回 (False, 错误信息)。"""
+    skill_dir = _find_alice_skill()
+    if not skill_dir:
+        return False, "Wind Alice skill 未安装"
+
+    import subprocess
+    import platform
+
+    try:
+        if platform.system() == "Windows":
+            # Windows 使用 PowerShell 脚本
+            cmd = [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", f"{skill_dir}/scripts/acra.ps1",
+                "--prompt", f"{commodity_name}日报",
+                "--no-wait",
+                "-d", str(BASE),
+            ]
+        else:
+            # macOS/Linux 使用 Node.js 脚本
+            cmd = [
+                "node", f"{skill_dir}/scripts/cli.mjs",
+                "--prompt", f"{commodity_name}日报",
+                "--no-wait",
+                "-d", str(BASE),
+            ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=timeout, cwd=str(BASE)
+        )
+
+        if result.returncode == 0:
+            output = result.stdout or ""
+            # 提取 agentResult.value 内容
+            if "agentResult.value" in output:
+                start = output.find("agentResult.value") + len("agentResult.value")
+                # 找到值开始位置
+                while start < len(output) and output[start] not in ('"', "'", "\n"):
+                    start += 1
+                if start < len(output):
+                    end = output.find("ALICE_COMMODITY_RESEARCH_ASSISTANT_DONE", start)
+                    if end > 0:
+                        report = output[start+1:end].strip()
+                        if len(report) > 100:
+                            return True, report
+            return True, output[:3000] if output else "(空输出)"
+        else:
+            err = result.stderr or str(result.returncode)
+            return False, f"退出码 {result.returncode}: {err[:200]}"
+
+    except subprocess.TimeoutExpired:
+        return False, "超时（Wind Alice 响应过慢）"
+    except FileNotFoundError:
+        return False, "Node.js/PowerShell 未找到"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
+
+
+def append_alice_section(md_text, max_commodities=3):
+    """在简报末尾追加 Wind Alice 专业研报摘要。
+    只取前 N 个品种，每个品种限制字数，避免简报过长。"""
+    reports = []
+    for name, _ in ALICE_COMMODITIES[:max_commodities]:
+        log(f"📊 调用 Wind Alice 生成【{name}】研报…")
+        ok, content = generate_alice_report(name)
+        if ok and len(content) > 50:
+            # 截取前 800 字作为摘要
+            summary = content[:800] + ("…" if len(content) > 800 else "")
+            reports.append(f"### 📊 {name} · Wind Alice 专业分析\n\n{summary}\n")
+        else:
+            log(f"⚠️ Wind Alice 【{name}】生成失败: {content[:100]}")
+
+    if not reports:
+        return md_text  # 没有成功的报告，原样返回
+
+    section = (
+        "\n\n---\n\n"
+        "## 🏛️ 机构研报（Wind Alice）\n\n"
+        + "\n".join(reports)
+        + "\n*以上由 Wind Alice 商品智研助手自动生成，仅供参考，不构成投资建议。*\n"
+    )
+    return md_text + section
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", nargs="?", choices=["morning", "evening"],
@@ -1136,6 +1308,14 @@ def main():
                       summary_chars=cfg.get("summary_chars", 130),
                       calendar_md=cal_md, pages_base=pages_base,
                       max_overview=cfg.get("max_overview", 8))
+
+    # v6 新增：可选追加 Wind Alice 专业研报（未授权时自动跳过）
+    if cfg.get("alice_reports", True):
+        log("尝试生成 Wind Alice 专业研报…")
+        try:
+            md = append_alice_section(md, max_commodities=cfg.get("alice_max", 3))
+        except Exception as e:
+            log(f"Wind Alice 研报生成跳过: {e}")
 
     digests = BASE / "digests"
     digests.mkdir(exist_ok=True)
