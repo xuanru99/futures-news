@@ -473,18 +473,19 @@ _STOPS = {"the", "of", "and", "to", "in", "a", "on", "for", "as", "is",
 
 
 def _junk_para(t):
-    """识别导航菜单 / 标签云 / 行情数字表等非正文段落。"""
+    """识别导航菜单 / 标签云 / 行情数字表等非正文段落。v7 大幅放宽避免误杀正文。"""
     words = t.split()
     n = len(words)
     if n == 0:
         return True
     stops = sum(1 for w in words if w.lower() in _STOPS)
     nums = sum(1 for w in words if re.match(r"^[\d$+.%•:-]+$", w))
-    if n > 50 and stops / n < 0.08:      # 导航/标签云：几乎没有虚词（放宽阈值）
+    # v7 放宽：只有极短的纯导航/标签才会被杀掉
+    if n > 80 and stops / n < 0.04:     # 之前0.08，现在更宽松
         return True
-    if n > 20 and nums / n > 0.4:        # 行情数字表（放宽）
+    if n > 40 and nums / n > 0.55:       # 之前0.4，允许更多数字（财经新闻本身数字多）
         return True
-    if t.count("%") >= 5:                # 百分比过多（放宽）
+    if t.count("%") >= 10:               # 之前5，财经新闻经常有多个百分比
         return True
     return False
 
@@ -549,65 +550,108 @@ def _extract_rss_real_link(item_data):
     return None
 
 
-def fetch_full_article(opener, link, timeout=20, max_chars=25000, max_paras=120):
+def fetch_full_article(opener, link, timeout=25, max_chars=35000, max_paras=150):
     """抓原文页面，提取整篇正文段落（用于全文翻译）。
-    多策略提取：JSON-LD articleBody → <article> 标签 → <p> 段落 → meta 描述。
-    返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。
-    v6 增强：链接解析失败不再返回空串，保证英文原文链接始终可点。"""
+    v7 大改：多策略提取 + 放宽过滤 + 详细日志 + 付费墙站点特殊处理。
+    返回 (段落列表, 真实链接)；拿不到正文返回 ([], 真实链接)。"""
     real_link = _resolve_google_news(opener, link)
-    # real_link 现在保证非空（最差也是原链接）
+    src_host = urllib.parse.urlparse(real_link).netloc
+
     try:
         req = urllib.request.Request(real_link, headers={"User-Agent": UA})
         with opener.open(req, timeout=timeout) as r:
-            body = r.read(600000).decode("utf-8", "ignore")
-    except Exception:
+            body = r.read(800000).decode("utf-8", "ignore")
+    except Exception as e:
+        log(f"⚠️ 无法抓取 {src_host}: {e}")
         return [], real_link
-    # 剥掉脚本 / 样式 / 导航页脚等非正文块
+
+    # 剥掉非正文块
     body = re.sub(r"<(script|style|nav|footer|aside|header|form)[^>]*>.*?</\1>", " ",
                   body, flags=re.S | re.I)
 
-    # 策略 1：JSON-LD 结构化数据（WSJ/FT/CNBC 等付费墙站点常在此处嵌入完整正文）
     paras = []
+    extract_method = "无"
+
+    # ====== 策略 1: JSON-LD articleBody（WSJ/FT/CNBC 付费墙站点的最佳来源）======
     for jm in re.finditer(r'"articleBody"\s*:\s*"((?:[^"\\]|\\.)*)"', body):
         raw = jm.group(1).replace('\\"', '"').replace('\\n', '\n')
         for p in re.split(r'\n{2,}', raw):
             t = _clean_text(p)
-            if len(t) >= 40 and not _PARA_CODE.search(t) and not _junk_para(t):
+            # v7: 阈值从40降到25，允许更短的段落
+            if len(t) >= 25 and not _PARA_CODE.search(t) and not _junk_para(t):
                 paras.append(t)
         if paras:
+            extract_method = f"JSON-LD({len(paras)}段)"
             break
 
-    # 策略 2：<article> 标签内的内容（很多新闻站用此包裹正文）
-    if not paras or sum(len(p) for p in paras) < 200:
+    # ====== 策略 2: <article> 标签 ======
+    if not paras or sum(len(p) for p in paras) < 300:
         am = re.search(r'<article[^>]*>(.*?)</article>', body, re.S | re.I)
         if am:
             for pm in re.finditer(r'<p[^>]*>(.*?)</p>', am.group(1), re.S | re.I):
                 t = _clean_text(pm.group(1))
-                if len(t) >= 40 and not _PARA_JUNK.match(t) and not _PARA_CODE.search(t) and not _junk_para(t):
+                if len(t) >= 25 and not _PARA_JUNK.match(t) and not _PARA_CODE.search(t) and not _junk_para(t):
                     if paras and (t in paras[-1] or paras[-1] in t):
                         continue
                     paras.append(t)
+            if len(paras) > 0:
+                extract_method = f"article标签({len(paras)}段)"
 
-    # 策略 3：全页面 <p> 段落（兜底）
-    if not paras or sum(len(p) for p in paras) < 200:
+    # ====== 策略 3: 全页面 <p> 段落（兜底）======
+    if not paras or sum(len(p) for p in paras) < 300:
         paras = []
         for pm in re.finditer(r"<p[^>]*>(.*?)</p>", body, re.S | re.I):
             t = _clean_text(pm.group(1))
-            if len(t) < 40 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
+            # v7: 进一步放宽
+            if len(t) < 20 or _PARA_JUNK.match(t) or _PARA_CODE.search(t) or _junk_para(t):
                 continue
             if paras and (t in paras[-1] or paras[-1] in t):
                 continue
             paras.append(t)
             if len(paras) >= max_paras or sum(len(p) for p in paras) >= max_chars:
                 break
+        if paras:
+            extract_method = f"全页面p标签({len(paras)}段)"
 
-    # 兜底：meta 描述（通常是导语）
-    if sum(len(p) for p in paras) < 100:
-        m = _META_DESC_RE.search(body) or _META_DESC_RE2.search(body)
-        if m:
-            d = _clean_text(m.group(1))
-            if len(d) >= 60 and not _PARA_CODE.search(d) and d not in paras:
-                paras.insert(0, d)
+    # ====== 策略 4: og:description / twitter:description / meta description ======
+    total_chars = sum(len(p) for p in paras)
+    if total_chars < 150:
+        # 尝试多个 meta 标签
+        meta_patterns = [
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']{80,})["\']',
+            r'<meta[^>]+name=["\']twitter:description["\'][^>]+content=["\']([^"\']{80,})["\']',
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']{60,})["\']',
+        ]
+        for mp in meta_patterns:
+            m = re.search(mp, body, re.I)
+            if m:
+                d = _clean_text(m.group(1))
+                if d and d not in [p[:50] for p in paras]:
+                    paras.insert(0, d)
+                    extract_method += f"+meta描述({len(d)}字)"
+                    break
+
+    # ====== 策略 5: 从页面主内容区提取纯文本（最后兜底）======
+    if sum(len(p) for p in paras) < 200:
+        for main_tag in ['main', '[role="main"]', '.article-body', '.post-content',
+                          '.entry-content', '.story-body', '.article__body']:
+            mm = re.search(rf'<{main_tag}[^>]*>(.*?)</{main_tag.split("[")[0]}>', body, re.S | re.I)
+            if mm:
+                text = _clean_text(mm.group(1))
+                # 按双换行/句号分段
+                for chunk in re.split(r'\n\n|[.!?]\s+', text):
+                    chunk = chunk.strip()
+                    if len(chunk) >= 30 and not _PARA_JUNK.match(chunk) and not _junk_para(chunk):
+                        if chunk not in paras:
+                            paras.append(chunk)
+                if sum(len(p) for p in paras) >= 300:
+                    extract_method += f"+main区({len(paras)}段)"
+                    break
+
+    # 日志：记录提取结果
+    total_chars = sum(len(p) for p in paras)
+    log(f"📄 {src_host}: {extract_method}, {len(paras)}段/{total_chars}字")
+
     return paras, real_link
 
 # ---------------------------------------------------------------- 机器翻译（中文化简报）
@@ -621,27 +665,58 @@ _MM_JUNK = re.compile(r"MYMEMORY WARNING|QUERY LENGTH LIMIT|INVALID (SOURCE|TARG
 
 
 def _google_translate(opener, text):
-    """Google 免费通道；长文自动按句分块（每块 <=1200 字符），429/5xx 重试一次。"""
+    """Google 免费通道；长文自动按句分块（每块 <=1000 字符），429/5xx 重试3次。"""
     out = []
-    for chunk in _split_sentences(text, 1200) or [text]:
+    # v7: 分块从1200降到1000，减少单次请求被拒概率
+    for chunk in _split_sentences(text, 1000) or [text]:
         url = ("https://translate.googleapis.com/translate_a/single?client=gtx"
                "&sl=en&tl=zh-CN&dt=t&q=" + urllib.parse.quote(chunk))
-        for attempt in (1, 2):
+        # v7: 重试从2次增加到3次，等待时间递增
+        for attempt in (1, 2, 3):
             try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with opener.open(req, timeout=20) as r:  # v7: timeout 15→20
+                    data = json.loads(r.read().decode("utf-8", "ignore"))
+                translated = "".join(seg[0] for seg in data[0] if seg and seg[0])
+                if translated:
+                    out.append(translated)
+                break
+            except urllib.error.HTTPError as e:
+                if attempt == 3 or e.code not in (429, 500, 502, 503):
+                    raise
+                import time
+                time.sleep(3 * attempt)  # v7: 等待3s/6s/9s
+            except Exception:
+                if attempt == 3:
+                    raise
+    return "".join(out)
+
+
+def _translate_sentence_by_sentence(opener, text):
+    """v7 新增：逐句翻译兜底——当整段翻译失败时，拆成单句逐个翻。"""
+    import time
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    results = []
+    for sent in sentences:
+        if not sent.strip() or len(sent.strip()) < 10:
+            results.append(sent)
+            continue
+        translated = None
+        for attempt in range(3):
+            try:
+                url = ("https://translate.googleapis.com/translate_a/single?client=gtx"
+                       "&sl=en&tl=zh-CN&dt=t&q=" + urllib.parse.quote(sent.strip()))
                 req = urllib.request.Request(url, headers={"User-Agent": UA})
                 with opener.open(req, timeout=15) as r:
                     data = json.loads(r.read().decode("utf-8", "ignore"))
-                out.append("".join(seg[0] for seg in data[0] if seg and seg[0]))
-                break
-            except urllib.error.HTTPError as e:
-                if attempt == 2 or e.code not in (429, 500, 502, 503):
-                    raise
-                import time
-                time.sleep(2.5)
+                t = "".join(seg[0] for seg in data[0] if seg and seg[0])
+                if t and _HAS_CJK.search(t):
+                    translated = t
+                    break
             except Exception:
-                if attempt == 2:
-                    raise
-    return "".join(out)
+                time.sleep(2)
+        results.append(translated if translated else sent)
+    return " ".join(results)
 
 
 def _split_sentences(text, limit=400):
@@ -680,36 +755,68 @@ def _mymemory_translate(opener, text):
 
 
 def translate(opener, text):
-    """英文 -> 中文；全部失败返回空串（调用方回退英文原文）。"""
+    """英文 -> 中文；v7 增强：整段失败时逐句翻译兜底，全部失败返回空串。"""
     if not text or not re.search(r"[A-Za-z]", text):
         return text or ""
     key = text[:200]
     if key in TRANS_CACHE:
         return TRANS_CACHE[key]
-    for fn in (_google_translate, _mymemory_translate):
+
+    result = ""
+    # 策略1: Google 整段翻译
+    try:
+        t = _google_translate(opener, text)
+        if t and _HAS_CJK.search(t) and len(t) > len(text) * 0.3:
+            result = t
+    except Exception:
+        pass
+
+    # 策略2: Google 逐句翻译（v7 新增）
+    if not result:
         try:
-            t = fn(opener, text)
+            log("  ⚠️ 整段翻译失败，尝试逐句翻译…")
+            t = _translate_sentence_by_sentence(opener, text)
             if t and _HAS_CJK.search(t):
-                TRANS_CACHE[key] = t
-                return t
+                result = t
         except Exception:
-            continue
-    return ""
+            pass
+
+    # 策略3: MyMemory 兜底
+    if not result:
+        try:
+            t = _mymemory_translate(opener, text)
+            if t and _HAS_CJK.search(t):
+                result = t
+        except Exception:
+            pass
+
+    if result:
+        TRANS_CACHE[key] = result
+    else:
+        log(f"  ❌ 翻译完全失败: {text[:60]}...")
+    return result
 
 
-def translate_many(opener, texts, workers=6):
-    """并发翻译一批文本，返回 {原文: 译文}（失败的原文对应空串）。"""
+def translate_many(opener, texts, workers=3):
+    """v7: 并发翻译一批文本，workers从6降到3避免429限流。返回 {原文: 译文}。"""
     uniq = list({t for t in texts if t})
     out = {t: "" for t in uniq}
     if not uniq:
         return out
+    log(f"🔄 开始并发翻译 {len(uniq)} 段文本（workers={workers}）…")
+    success_count = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(translate, opener, t): t for t in uniq}
         for f, t in futs.items():
             try:
-                out[t] = f.result(timeout=120)
-            except Exception:
+                result = f.result(timeout=180)  # v7: 超时从120→180
+                out[t] = result
+                if result and _HAS_CJK.search(result):
+                    success_count += 1
+            except Exception as e:
                 out[t] = ""
+                log(f"  ❌ 翻译异常: {t[:40]}… → {e}")
+    log(f"✅ 翻译完成: 成功 {success_count}/{len(uniq)} ({success_count*100//max(len(uniq),1)}%)")
     return out
 
 # ---------------------------------------------------------------- 财经事件日历
@@ -952,20 +1059,25 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
 
     # 1) 并发抓整篇正文（Google News 链接会先解出真实出版方链接）
     if opener is not None and selected:
-        log(f"并发抓取 {len(selected)} 条新闻的整篇正文…")
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        log(f"🌐 并发抓取 {len(selected)} 条新闻的整篇正文…")
+        fetch_ok = 0
+        with ThreadPoolExecutor(max_workers=8) as ex:
             futs = {ex.submit(fetch_full_article, opener, x["link"]): x
                     for x in selected}
             for fut, x in futs.items():
                 try:
-                    paras, real = fut.result(timeout=60)
+                    paras, real = fut.result(timeout=90)  # v7: 超时60→90
                     x["paras"], x["real_link"] = paras, real
-                except Exception:
-                    pass
-        for x in selected:  # 正文抓不到时回退 RSS 描述
+                    if paras:
+                        fetch_ok += 1
+                except Exception as e:
+                    log(f"  ❌ 抓取异常 [{x['src']}]: {e}")
+        # 正文抓不到时回退 RSS 描述
+        for x in selected:
             if not x["paras"] and x.get("desc"):
                 x["paras"] = [x["desc"]]
-        log(f"正文抓取完成：成功 {sum(1 for x in selected if x['paras'])}/{len(selected)}")
+                log(f"  ⚠️ [{x['src']}] 正文为空，回退RSS描述({len(x['desc'])}字)")
+        log(f"✅ 正文抓取完成: 成功 {fetch_ok}/{len(selected)} ({fetch_ok*100//max(len(selected),1)}%)")
 
     # 2) 全文翻译：标题 + 每个正文段落并发翻译（整篇翻完，不只翻一两句）
     if translate_on and opener is not None:
@@ -975,11 +1087,19 @@ def build_digest(pool, hours, mode_label, max_per_section, max_total,
             texts.extend(x["paras"])
         uniq = list({t for t in texts if t})
         log(f"并发翻译 {len(uniq)} 段文本（标题 + 全部正文段落）…")
-        tr = translate_many(opener, uniq, workers=4)
+        # v7: workers从4降到3，避免429限流
+        tr = translate_many(opener, uniq, workers=3)
         log(f"翻译完成：成功 {sum(1 for v in tr.values() if v)}/{len(tr)}")
+        # v7: 逐条记录翻译质量
         for x in selected:
-            x["title_zh"] = tr.get(x["title"]) or x["title"]
-            x["paras_zh"] = [tr.get(p) or p for p in x["paras"]]
+            title_tr = tr.get(x["title"]) or ""
+            paras_tr = [tr.get(p) or "" for p in x["paras"]]
+            zh_count = sum(1 for p in paras_tr if p and _HAS_CJK.search(p))
+            x["title_zh"] = title_tr or x["title"]
+            x["paras_zh"] = [p or orig for p, orig in zip(paras_tr, x["paras"])]
+            # 诊断日志
+            if zh_count < len(x["paras"]) // 2 and len(x["paras"]) > 2:
+                log(f"⚠️ [{x['src']}] 翻译率低: {zh_count}/{len(x['paras'])}段")
     else:
         for x in selected:  # 翻译关闭时直接用原文（页面照常生成）
             x["paras_zh"] = list(x["paras"])

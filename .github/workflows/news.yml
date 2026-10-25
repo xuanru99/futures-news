@@ -1,32 +1,37 @@
 name: futures-news
 
 # ============================================================
-# 定时推送配置（v6 精确版）
+# 定时推送配置 v7（精确时间守卫版）
 # ============================================================
 # GitHub Actions 使用 UTC 时间，北京时间 = UTC + 8 小时
 #
-# ✅ 晨报：UTC 23:30 → 北京 07:30（覆盖隔夜美盘 16h）
-# ✅ 晚报：UTC 11:30 → 北京 19:30（覆盖白天 12h）
+# ✅ 晨报：UTC 23:30 → 北京 07:30
+# ✅ 晚报：UTC 11:30 → 北京 19:30
 #
-# ⚠️ 注意：GitHub Actions cron 可能有 ±5 分钟延迟，属正常现象
-# ⚠️ 如果看到非上述时间的运行，那是手动触发（workflow_dispatch）
+# ⚠️ GitHub Actions cron 可能有延迟，但本工作流加了时间守卫：
+#    非上述时段 ±10分钟 的自动触发会被拒绝，不会误推
 # ============================================================
+
 on:
   schedule:
     # 晨报：北京时间 07:30 = UTC 23:30（前一天晚上）
     - cron: "30 23 * * *"
     # 晚报：北京时间 19:30 = UTC 11:30
     - cron: "30 11 * * *"
-  workflow_dispatch:          # 允许在 GitHub 页面手动 Run workflow 测试
+  workflow_dispatch:
     inputs:
       mode:
         description: "morning=晨报(回溯16h) evening=晚报(回溯12h)"
         type: choice
         default: morning
         options: [morning, evening]
+      force:
+        description: "强制推送（跳过时间检查）"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write             # 允许把生成的中文全文网页 commit 回仓库（GitHub Pages 托管）
+  contents: write
 
 jobs:
   push-news:
@@ -38,39 +43,119 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Decide mode (strict time check)
+      # ====== 时间守卫 + 模式决定 ======
+      - name: Time guard & decide mode
+        id: setup
         run: |
-          echo "=== 当前 UTC 时间 ==="
-          date -u '+%Y-%m-%d %H:%M:%S UTC'
-          echo "=== 当前北京时间 ==="
-          TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST'
+          echo "============================================"
+          echo "  期货外盘新闻简报 - 时间守卫 v7"
+          echo "============================================"
           echo ""
-          
-          # 根据触发来源决定模式
+          echo "当前 UTC 时间：$(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+          echo "当前北京时间：$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S CST')"
+          echo ""
+
+          # 获取当前北京时间的小时和分钟
+          BJ_HOUR=$(TZ='Asia/Shanghai' date '+%H')
+          BJ_MIN=$(TZ='Asia/Shanghai' date '+%M')
+          BJ_TIME=$((BJ_HOUR * 60 + BJ_MIN))
+          echo "北京时间分钟数（从00:00起算）: ${BJ_TIME} (即 ${BJ_HOUR}:${BJ_MIN})"
+
+          MODE=""
+          SHOULD_RUN="true"
+          REASON=""
+
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # 定时触发：根据 cron 表达式判断是晨报还是晚报
+            # ========== 定时触发 ==========
             SCHEDULE="${{ github.event.schedule }}"
-            echo "调度表达式: ${SCHEDULE}"
-            
+            echo "触发方式: 定时调度 (cron: ${SCHEDULE})"
+            echo ""
+
+            # 根据 cron 判断期望模式
             if [ "$SCHEDULE" = "30 11 * * *" ]; then
-              echo "MODE=evening" >> "$GITHUB_ENV"
-              echo "→ 晚报模式（北京 19:30）"
+              EXPECT_MODE="evening"
+              EXPECT_BJ_TIME=$((19*60+30))  # 19:30 = 1170 分钟
+              WINDOW_START=$((EXPECT_BJ_TIME - 15))   # 19:15
+              WINDOW_END=$((EXPECT_BJ_TIME + 20))      # 19:50
             else
-              echo "MODE=morning" >> "$GITHUB_ENV"
-              echo "→ 晨报模式（北京 07:30）"
+              EXPECT_MODE="morning"
+              EXPECT_BJ_TIME=$((7*60+30))    # 07:30 = 450 分钟
+              WINDOW_START=$((EXPECT_BJ_TIME - 15))    # 07:15
+              WINDOW_END=$((EXPECT_BJ_TIME + 25))       # 07:55
             fi
+
+            echo "期望模式: ${EXPECT_MODE}"
+            echo "期望北京时间: $((EXPECT_BJ_TIME/60)):$(printf '%02d' $((EXPECT_BJ_TIME%60)))"
+            echo "允许窗口: $((WINDOW_START/60)):$(printf '%02d' $((WINDOW_START%60))) ~ $((WINDOW_END/60)):$(printf '%02d' $((WINDOW_END%60)))"
+            echo ""
+
+            # 时间守卫：检查当前北京时间是否在允许窗口内
+            if [ "$BJ_TIME" -ge "$WINDOW_START" ] && [ "$BJ_TIME" -le "$WINDOW_END" ]; then
+              MODE="$EXPECT_MODE"
+              REASON="时间守卫通过 ✓（${EXPECT_MODE}模式）"
+              echo "✅ 时间守卫通过！执行 ${MODE} 推送"
+            else
+              SHOULD_RUN="false"
+              # 计算偏差
+              if [ "$BJ_TIME" -lt "$WINDOW_START" ]; then
+                DIFF=$((WINDOW_START - BJ_TIME))
+                REASON="❌ 时间守卫拦截！早了 $((DIFF/60))小时$((DIFF%60))分钟（不在 ${EXPECT_MODE} 窗口内）"
+              else
+                DIFF=$((BJ_TIME - WINDOW_END))
+                REASON="❌ 时间守卫拦截！晚了 $((DIFF/60))小时$((DIFF%60))分钟（不在 ${EXPECT_MODE} 窗口内）"
+              fi
+              echo "${REASON}"
+              echo "→ 本次定时触发将被跳过，不生成不推送"
+            fi
+
           else
-            # 手动触发：使用输入参数或默认 morning
-            echo "MODE=${{ github.event.inputs.mode || 'morning' }}" >> "$GITHUB_ENV"
-            echo "→ 手动触发，模式: $MODE"
+            # ========== 手动触发 ==========
+            INPUT_MODE="${{ github.event.inputs.mode }}"
+            INPUT_FORCE="${{ github.event.inputs.force }}"
+            echo "触发方式: 手动触发"
+            echo "输入模式: ${INPUT_MODE}"
+            echo "强制推送: ${INPUT_FORCE}"
+
+            if [ "$INPUT_FORCE" = "true" ]; then
+              MODE="$INPUT_MODE"
+              REASON="强制推送模式 ✓（跳过时间检查）"
+              echo "✅ 强制推送，跳过时间检查"
+            else
+              # 手动触发也做时间提醒（但不阻止）
+              MODE="$INPUT_MODE"
+              REASON="手动触发 ✓（建议仅在测试时使用）"
+              echo "⚠️ 手动触发，将执行推送（请注意这不是定时推送）"
+            fi
           fi
 
-      # 1) 生成简报 + 每条新闻的中文全文网页（docs/articles/日期/xx.html），不推送
+          echo ""
+          echo "============================================"
+          echo "  最终决定: MODE=${MODE}"
+          echo "  是否执行: ${SHOULD_RUN}"
+          echo "  原因: ${REASON}"
+          echo "============================================"
+
+          echo "MODE=${MODE}" >> "$GITHUB_ENV"
+          echo "SHOULD_RUN=${SHOULD_RUN}" >> "$GITHUB_ENV"
+          echo "REASON=${REASON}" >> "$GITHUB_ENV"
+
+      # 如果时间守卫不通过，直接结束
+      - name: Skip (time guard blocked)
+        if: env.SHOULD_RUN != 'true'
+        run: |
+          echo "============================================"
+          echo "  ⏭️  跳过本次运行"
+          echo "  ${REASON}"
+          echo "============================================"
+          echo "如需强制推送，请使用 workflow_dispatch 并勾选 'force: true'"
+
+      # ====== 正常流程 ======
       - name: Generate digest and Chinese article pages
+        if: env.SHOULD_RUN == 'true'
         run: python news_bot.py --config config.cloud.json --out-only "$MODE"
 
-      # 2) 把中文网页 commit 回 main 分支，GitHub Pages 自动构建发布
       - name: Publish article pages
+        if: env.SHOULD_RUN == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -82,14 +167,14 @@ jobs:
             git push origin HEAD:main
           fi
 
-      # 3) 等 GitHub Pages 构建生效（通常 30-90 秒），避免推送出去的链接 404
       - name: Wait for GitHub Pages build
+        if: env.SHOULD_RUN == 'true'
         run: |
           echo "等待 GitHub Pages 构建生效…"
           sleep 75
 
-      # 4) 推送简报到微信（支持多个 Server酱 key = 多个微信）
       - name: Push digest to WeChat
+        if: env.SHOULD_RUN == 'true'
         env:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           SERVERCHAN_KEY_2: ${{ secrets.SERVERCHAN_KEY_2 }}
